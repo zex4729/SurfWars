@@ -1,0 +1,27 @@
+[package]
+name = "surfwars"
+version = "0.1.0"
+edition = "2021"
+description = "A Counter-Strike 1.6 style surf deathmatch with GoldSrc movement, bots and two teams"
+license = "MIT"
+
+[features]
+default = ["audio"]
+# Sound effects (procedurally generated). On Linux this needs the ALSA
+# development package (libasound2-dev / alsa-lib-devel) to build.
+audio = ["macroquad/audio"]
+
+[dependencies]
+macroquad = { version = "0.4", default-features = false }
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+debug = false
+lto = "thin"
+codegen-units = 4
