@@ -208,6 +208,20 @@ fn ramp_y(y0: f32, y1: f32, xc: f32, z0: f32, z1: f32, hw: f32, h: f32, mat: Mat
     )
 }
 
+/// Spawn floor tinted toward the colour of the ramp below it, so it is
+/// obvious where to drop from the spawn.
+fn tint(base: Mat, lane: Mat) -> Mat {
+    let c = |i: usize| ((base.color[i] as u16 + lane.color[i] as u16 * 2) / 3) as u8;
+    Mat::new(base.tex, [c(0), c(1), c(2)])
+}
+
+/// A floor slab split into bands along Y, each with its own material.
+fn banded_slab(b: &mut Vec<Brush>, x0: f32, x1: f32, z0: f32, z1: f32, bands: &[(f32, f32, Mat)]) {
+    for &(y0, y1, mat) in bands {
+        b.push(cuboid(vec3(x0.min(x1), y0.min(y1), z0), vec3(x0.max(x1), y0.max(y1), z1), mat));
+    }
+}
+
 fn cuboid(mins: Vec3, maxs: Vec3, mat: Mat) -> Brush {
     Brush::cuboid(mins, maxs, mat)
 }
@@ -324,23 +338,40 @@ fn surf_wars() -> Map {
         let hi = |a: f32, c: f32| a.max(c);
 
         // Spawn platform.
-        let (a, c) = (fx(4400.0), fx(3500.0));
-        b.push(cuboid(vec3(lo(a, c), -900.0, SW_SPAWN_Z - 64.0), vec3(hi(a, c), 900.0, SW_SPAWN_Z), team_mat));
+        banded_slab(
+            &mut b,
+            fx(4400.0),
+            fx(3500.0),
+            SW_SPAWN_Z - 64.0,
+            SW_SPAWN_Z,
+            &[
+                (-900.0, -588.0, tint(team_mat, RAMP_B)),
+                (-588.0, 588.0, team_mat),
+                (588.0, 900.0, tint(team_mat, RAMP_A)),
+            ],
+        );
         // Back wall.
         let (a, c) = (fx(4400.0), fx(4464.0));
         b.push(cuboid(vec3(lo(a, c), -1900.0, SW_SPAWN_Z - 64.0), vec3(hi(a, c), 1900.0, SW_SPAWN_Z + 320.0), trim));
         // Support column under the platform.
         let (a, c) = (fx(4350.0), fx(4100.0));
         b.push(cuboid(vec3(lo(a, c), -150.0, 0.0), vec3(hi(a, c), 150.0, SW_SPAWN_Z - 64.0), CONCRETE));
-        // Bridges to the side bunny hop paths.
+        // Bridges to the side bunny hop paths, over the outer lane faces.
         for ys in [-1.0f32, 1.0] {
             let (a, c) = (fx(4400.0), fx(4000.0));
-            let (y0, y1) = (ys * 900.0, ys * 2150.0);
-            b.push(cuboid(
-                vec3(lo(a, c), lo(y0, y1), SW_SPAWN_Z - 64.0),
-                vec3(hi(a, c), hi(y0, y1), SW_SPAWN_Z),
-                team_mat,
-            ));
+            let lane = if ys > 0.0 { RAMP_A } else { RAMP_B };
+            banded_slab(
+                &mut b,
+                a,
+                c,
+                SW_SPAWN_Z - 64.0,
+                SW_SPAWN_Z,
+                &[
+                    (ys * 900.0, ys * 1100.0, team_mat),
+                    (ys * 1100.0, ys * 1612.0, tint(team_mat, lane)),
+                    (ys * 1612.0, ys * 2150.0, team_mat),
+                ],
+            );
             // railing on the outside of the bridge
             let (y0, y1) = (ys * 2150.0, ys * 2214.0);
             b.push(cuboid(vec3(lo(a, c), lo(y0, y1), SW_SPAWN_Z), vec3(hi(a, c), hi(y0, y1), SW_SPAWN_Z + 48.0), trim));
@@ -557,8 +588,20 @@ fn surf_canyon() -> Map {
         let fx = |x: f32| x * s;
         let lo = |a: f32, c: f32| a.min(c);
         let hi = |a: f32, c: f32| a.max(c);
-        let (a, c) = (fx(5400.0), fx(4500.0));
-        b.push(cuboid(vec3(lo(a, c), -2300.0, SC_SPAWN_Z - 64.0), vec3(hi(a, c), 2300.0, SC_SPAWN_Z), team_mat));
+        banded_slab(
+            &mut b,
+            fx(5400.0),
+            fx(4500.0),
+            SC_SPAWN_Z - 64.0,
+            SC_SPAWN_Z,
+            &[
+                (-2300.0, -1238.0, tint(team_mat, RAMP_B)),
+                (-1238.0, -620.0, team_mat),
+                (-620.0, 620.0, tint(team_mat, RAMP_C)),
+                (620.0, 1238.0, team_mat),
+                (1238.0, 2300.0, tint(team_mat, RAMP_A)),
+            ],
+        );
         let (a, c) = (fx(5400.0), fx(5464.0));
         b.push(cuboid(vec3(lo(a, c), -2300.0, SC_SPAWN_Z - 64.0), vec3(hi(a, c), 2300.0, SC_SPAWN_Z + 320.0), trim));
         let (a, c) = (fx(5300.0), fx(5000.0));

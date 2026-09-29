@@ -55,6 +55,7 @@ struct Args {
     no_audio: bool,
     team: Option<Team>,
     look: Option<(f32, f32)>,
+    ui: Option<String>,
 }
 
 fn parse_args() -> Args {
@@ -98,6 +99,10 @@ fn parse_args() -> Args {
                         a.look = Some((p[0], p[1]));
                     }
                 }
+                i += 1;
+            }
+            "--ui" => {
+                a.ui = next;
                 i += 1;
             }
             "--menu" => a.menu = true,
@@ -605,6 +610,10 @@ impl App {
         }
 
         let alpha = (self.acc / TICK).clamp(0.0, 1.0);
+        self.draw_playing(alpha);
+    }
+
+    fn draw_playing(&mut self, alpha: f32) {
         let (view, fp) = self.compute_view(alpha);
         self.renderer.draw(&self.game, &view, alpha, fp);
         let pov = self.pov();
@@ -617,7 +626,9 @@ impl App {
             game: &self.game,
             pov,
             spectating,
-            show_scores: is_key_down(KeyCode::Tab) || self.game.phase == game::Phase::Over,
+            show_scores: is_key_down(KeyCode::Tab)
+                || self.game.phase == game::Phase::Over
+                || self.args.ui.as_deref() == Some("scores"),
             buy_menu: self.buy_menu,
             view_angles: if fp { view.angles } else { self.view },
             third_person: !fp,
@@ -970,26 +981,25 @@ async fn main() {
                 }
             }
         }
+        match args.ui.as_deref() {
+            Some("buy") => app.buy_menu = true,
+            Some("pause") => app.paused = true,
+            Some("scope") => {
+                if let Some(li) = app.game.local {
+                    let p = &mut app.game.players[li];
+                    p.primary = Some(weapons::Weapon::new(weapons::WeaponId::Awp));
+                    p.active = Slot::Primary;
+                    p.zoom = 1;
+                }
+            }
+            _ => {}
+        }
         for frame in 0..3 {
             clear_background(BLACK);
             if app.screen == Screen::Menu {
                 app.frame_menu(0.0);
             } else {
-                let alpha = 0.0;
-                let (view, fp) = app.compute_view(alpha);
-                app.renderer.draw(&app.game, &view, alpha, fp);
-                let pov = app.pov();
-                let spectating = app.game.local.is_none_or(|li| !app.game.players[li].alive);
-                hud::draw(&hud::HudState {
-                    game: &app.game,
-                    pov,
-                    spectating,
-                    show_scores: false,
-                    buy_menu: false,
-                    view_angles: if fp { view.angles } else { app.view },
-                    third_person: !fp,
-                    fps: 0,
-                });
+                app.draw_playing(0.0);
             }
             if frame == 2 {
                 take_screenshot_and_exit(&path).await;

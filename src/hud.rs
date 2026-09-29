@@ -403,7 +403,7 @@ fn draw_status_text(g: &Game, p: &Player, view: Vec3, sw: f32, sh: f32, s: f32) 
 
 fn draw_buy_menu(g: &Game, pov: Option<usize>, _sw: f32, sh: f32, s: f32) {
     let x = 30.0 * s;
-    let y = sh * 0.22;
+    let y = sh * 0.3;
     let w = 330.0 * s;
     let line = 30.0 * s;
     let h = line * (ALL_BUYABLE.len() as f32 + 3.2);
@@ -434,11 +434,11 @@ fn draw_scoreboard(g: &Game, sw: f32, sh: f32, s: f32) {
     let row = 24.0 * s;
     let rows = g.players.len() as f32 + 6.0;
     panel(x, y, w, row * rows);
-    text_shadow(&format!("{}   —   Round {}", g.map.name, g.round), x + 16.0 * s, y + 28.0 * s, 22.0 * s, HUD_COLOR);
+    text_shadow(&format!("{}   -   Round {}", g.map.name, g.round), x + 16.0 * s, y + 28.0 * s, 22.0 * s, HUD_COLOR);
     let mut yy = y + 64.0 * s;
     for team in [Team::T, Team::CT] {
         let c = team_ui_color(team);
-        text_shadow(&format!("{}  —  {}", team.name(), g.score[team.index()]), x + 16.0 * s, yy, 20.0 * s, c);
+        text_shadow(&format!("{}  -  {}", team.name(), g.score[team.index()]), x + 16.0 * s, yy, 20.0 * s, c);
         text("Kills", x + w - 220.0 * s, yy, 16.0 * s, GRAY);
         text("Deaths", x + w - 140.0 * s, yy, 16.0 * s, GRAY);
         yy += row;

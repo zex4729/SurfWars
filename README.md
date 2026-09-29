@@ -44,7 +44,8 @@ classic CS arsenal.
   - `surf_canyon`: three parallel lanes, pillar lines between them leading
     to mid platforms, and cross ramps below.
   Falling into the water teleports you back to your spawn, like on surf
-  servers.
+  servers. The spawn floor is tinted with the colour of the ramp below it, so
+  you can see where to drop in.
 - CS 1.6 style HUD (health, armor, ammo, timer, scores, kill feed, dynamic
   crosshair, radar, scoreboard) plus a speedometer, and procedurally
   synthesized sounds.
@@ -128,9 +129,11 @@ air, exactly like in CS.
 cargo test --release -- --nocapture
 ```
 
-The tests check the movement (standing, jumping, surfing a ramp), run a bot
-along every route of every map and report how far it gets, and simulate full
-bot matches to make sure fights happen and rounds end.
+The tests check the movement (standing, jumping, surfing a ramp, ramp seams,
+the stock bunny hop cap), weapon behaviour (auto fire and reloads, semi-auto
+pistols, scope resume, shotgun shell reloads, headshots), run a bot along
+every route of every map and report how far it gets, and simulate full bot
+matches to make sure fights happen and rounds end.
 
 The binary can also render screenshots without user input, which is how the
 images above were made:
@@ -140,5 +143,5 @@ cargo run --release -- --no-audio --shot out.png --cam spectate --after 11
 ```
 
 `--cam` accepts `spectate`, `third`, `eye`, `overview`, `possess` and
-`possess3`; `--map`, `--team t|ct`, `--follow N` and `--look pitch,yaw` are
-also available.
+`possess3`; `--ui buy|scores|pause|scope`, `--map`, `--team t|ct`,
+`--follow N` and `--look pitch,yaw` are also available.
