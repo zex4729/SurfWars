@@ -67,7 +67,7 @@ cargo run --release --no-default-features
 ```
 
 Settings from the menu are stored in `surfwars.cfg` next to where you run
-the game.
+the game. On a machine without a sound device, start it with `--no-audio`.
 
 ## Controls
 
