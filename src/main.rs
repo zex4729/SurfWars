@@ -58,10 +58,7 @@ struct Args {
 }
 
 fn parse_args() -> Args {
-    let mut a = Args {
-        after: 3.0,
-        ..Default::default()
-    };
+    let mut a = Args { after: 3.0, ..Default::default() };
     let v: Vec<String> = std::env::args().collect();
     let mut i = 1;
     while i < v.len() {
@@ -129,12 +126,7 @@ impl Options {
     }
 
     fn load() -> Options {
-        let mut o = Options {
-            settings: Settings::default(),
-            team_choice: 2,
-            sensitivity: 2.5,
-            volume: 0.7,
-        };
+        let mut o = Options { settings: Settings::default(), team_choice: 2, sensitivity: 2.5, volume: 0.7 };
         if let Ok(s) = std::fs::read_to_string(Self::path()) {
             for line in s.lines() {
                 let mut it = line.splitn(2, ' ');
@@ -150,9 +142,7 @@ impl Options {
                     "team" => o.team_choice = v.parse().unwrap_or(o.team_choice),
                     "autobhop" => o.settings.autobhop = v == "1",
                     "ramp_accuracy" => o.settings.ramp_accuracy = v == "1",
-                    "deathmatch" => {
-                        o.settings.mode = if v == "1" { Mode::Deathmatch } else { Mode::Rounds }
-                    }
+                    "deathmatch" => o.settings.mode = if v == "1" { Mode::Deathmatch } else { Mode::Rounds },
                     "difficulty" => {
                         o.settings.difficulty = match v {
                             "easy" => Difficulty::Easy,
@@ -200,11 +190,7 @@ struct Ui {
 impl Ui {
     fn new() -> Ui {
         let (x, y) = mouse_position();
-        Ui {
-            clicked: is_mouse_button_pressed(MouseButton::Left),
-            mouse: vec2(x, y),
-            scale: screen_height() / 720.0,
-        }
+        Ui { clicked: is_mouse_button_pressed(MouseButton::Left), mouse: vec2(x, y), scale: screen_height() / 720.0 }
     }
 
     fn button(&self, label: &str, x: f32, y: f32, w: f32, h: f32) -> bool {
@@ -257,7 +243,7 @@ fn team_from_choice(c: usize, rng_seed: u64) -> Option<Team> {
     match c {
         0 => Some(Team::T),
         1 => Some(Team::CT),
-        2 => Some(if rng_seed % 2 == 0 { Team::T } else { Team::CT }),
+        2 => Some(if rng_seed.is_multiple_of(2) { Team::T } else { Team::CT }),
         _ => None,
     }
 }
@@ -328,11 +314,7 @@ impl App {
     }
 
     fn build_cmd(&mut self) -> UserCmd {
-        let mut cmd = UserCmd {
-            msec: TICK_MSEC,
-            viewangles: self.view,
-            ..Default::default()
-        };
+        let mut cmd = UserCmd { msec: TICK_MSEC, viewangles: self.view, ..Default::default() };
         if self.paused {
             return cmd;
         }
@@ -411,10 +393,8 @@ impl App {
         if self.buy_menu {
             let keys = [KeyCode::Key1, KeyCode::Key2, KeyCode::Key3, KeyCode::Key4, KeyCode::Key5, KeyCode::Key6];
             for (i, k) in keys.iter().enumerate() {
-                if is_key_pressed(*k) {
-                    if self.game.buy(li, ALL_BUYABLE[i]) {
-                        self.buy_menu = false;
-                    }
+                if is_key_pressed(*k) && self.game.buy(li, ALL_BUYABLE[i]) {
+                    self.buy_menu = false;
                 }
             }
             if is_key_pressed(KeyCode::Key0) {
@@ -515,7 +495,7 @@ impl App {
                 return Some(li);
             }
         }
-        if self.game.players.get(self.spec_target).map_or(false, |p| p.alive) {
+        if self.game.players.get(self.spec_target).is_some_and(|p| p.alive) {
             Some(self.spec_target)
         } else {
             None
@@ -526,18 +506,9 @@ impl App {
         let p = &self.game.players[target];
         let pos = p.prev_origin.lerp(p.pm.origin, alpha) + vec3(0.0, 0.0, p.pm.view_ofs);
         let (f, _, _) = angle_vectors(angles);
-        let want = pos - f * dist + vec3(0.0, 0.0, 12.0);
-        let tr = self
-            .game
-            .map
-            .world
-            .trace(pos, want, vec3(-6.0, -6.0, -6.0), vec3(6.0, 6.0, 6.0));
-        View {
-            pos: tr.endpos,
-            angles,
-            fov: 90.0,
-            first_person: None,
-        }
+        let want = pos - f * dist + vec3(0.0, 0.0, 28.0);
+        let tr = self.game.map.world.trace(pos, want, vec3(-6.0, -6.0, -6.0), vec3(6.0, 6.0, 6.0));
+        View { pos: tr.endpos, angles, fov: 90.0, first_person: None }
     }
 
     fn compute_view(&mut self, alpha: f32) -> (View, bool) {
@@ -550,15 +521,7 @@ impl App {
                 }
                 let pos = p.prev_origin.lerp(p.pm.origin, alpha) + vec3(0.0, 0.0, p.pm.view_ofs);
                 let angles = self.view + p.pm.punchangle;
-                return (
-                    View {
-                        pos,
-                        angles,
-                        fov: p.fov(),
-                        first_person: Some(li),
-                    },
-                    true,
-                );
+                return (View { pos, angles, fov: p.fov(), first_person: Some(li) }, true);
             }
             if g.time - p.death_time < 2.0 {
                 // death cam: look at our body from above
@@ -570,15 +533,7 @@ impl App {
                 let p = &g.players[t];
                 if self.spec_first_person {
                     let pos = p.prev_origin.lerp(p.pm.origin, alpha) + vec3(0.0, 0.0, p.pm.view_ofs);
-                    (
-                        View {
-                            pos,
-                            angles: p.angles + p.pm.punchangle,
-                            fov: p.fov(),
-                            first_person: Some(t),
-                        },
-                        true,
-                    )
+                    (View { pos, angles: p.angles + p.pm.punchangle, fov: p.fov(), first_person: Some(t) }, true)
                 } else {
                     (self.chase_view(t, self.view, 150.0, alpha), false)
                 }
@@ -610,9 +565,9 @@ impl App {
         }
 
         // Spectator controls.
-        let local_alive = self.game.local_player().map_or(false, |p| p.alive);
+        let local_alive = self.game.local_player().is_some_and(|p| p.alive);
         if !local_alive && !self.paused {
-            let need = !self.game.players.get(self.spec_target).map_or(false, |p| p.alive)
+            let need = !self.game.players.get(self.spec_target).is_some_and(|p| p.alive)
                 || Some(self.spec_target) == self.game.local;
             if need {
                 // follow whoever killed us first
@@ -654,9 +609,10 @@ impl App {
         self.renderer.draw(&self.game, &view, alpha, fp);
         let pov = self.pov();
         self.audio.update_loops(&self.game, pov, self.paused);
-        let spectating = self.game.local.map_or(true, |li| {
-            !self.game.players[li].alive && self.game.time - self.game.players[li].death_time >= 2.0
-        });
+        let spectating = self
+            .game
+            .local
+            .is_none_or(|li| !self.game.players[li].alive && self.game.time - self.game.players[li].death_time >= 2.0);
         hud::draw(&hud::HudState {
             game: &self.game,
             pov,
@@ -754,8 +710,8 @@ impl App {
         self.simulate(dt);
         let g = &self.game;
         let now = g.time;
-        let cur_ok = g.players.get(self.menu_cam_target).map_or(false, |p| p.alive && p.board > 0.2);
-        if now > self.menu_cam_switch || !g.players.get(self.menu_cam_target).map_or(false, |p| p.alive) {
+        let cur_ok = g.players.get(self.menu_cam_target).is_some_and(|p| p.alive && p.board > 0.2);
+        if now > self.menu_cam_switch || !g.players.get(self.menu_cam_target).is_some_and(|p| p.alive) {
             // prefer someone surfing
             let mut best = None;
             for (i, p) in g.players.iter().enumerate() {
@@ -894,7 +850,13 @@ impl App {
             "Steer with the mouse, never press W on a ramp.",
         ];
         let mut ly = sh - (lines.len() as f32 + 1.0) * 22.0 * s;
-        draw_rectangle(cx - 12.0 * s, ly - 26.0 * s, 520.0 * s, (lines.len() as f32 + 1.0) * 22.0 * s + 8.0 * s, Color::new(0.0, 0.0, 0.0, 0.5));
+        draw_rectangle(
+            cx - 12.0 * s,
+            ly - 26.0 * s,
+            520.0 * s,
+            (lines.len() as f32 + 1.0) * 22.0 * s + 8.0 * s,
+            Color::new(0.0, 0.0, 0.0, 0.5),
+        );
         for l in lines {
             text_shadow(l, cx, ly, 18.0 * s, Color::new(1.0, 1.0, 1.0, 0.9));
             ly += 22.0 * s;
@@ -986,9 +948,15 @@ async fn main() {
                 Some((p, y)) => vec3(p, y, 0.0),
                 None => app.game.players[app.spec_target].angles,
             };
-            if let (Some(li), Some(f)) = (app.game.local, args.follow) {
+            if let (Some(li), Some(f)) = (app.game.local, Some(app.spec_target)) {
                 // Put the local player's camera on the followed bot.
-                if args.cam.as_deref() == Some("possess") {
+                if matches!(args.cam.as_deref(), Some("possess") | Some("possess3")) {
+                    app.third_person = args.cam.as_deref() == Some("possess3");
+                    app.game.players[li].angles = app.game.players[f].angles;
+                    app.view = match args.look {
+                        Some((p, y)) => vec3(p, y, 0.0),
+                        None => app.game.players[f].angles,
+                    };
                     let pm = app.game.players[f].pm;
                     app.game.players[li].pm = pm;
                     app.game.players[li].prev_origin = pm.origin;
@@ -996,6 +964,9 @@ async fn main() {
                     app.game.players[li].board_normal = app.game.players[f].board_normal;
                     app.game.players[li].primary = app.game.players[f].primary;
                     app.game.players[li].active = app.game.players[f].active;
+                    // hide the bot we took the place of
+                    app.game.players[f].alive = false;
+                    app.game.players[f].death_time = -100.0;
                 }
             }
         }
@@ -1008,7 +979,7 @@ async fn main() {
                 let (view, fp) = app.compute_view(alpha);
                 app.renderer.draw(&app.game, &view, alpha, fp);
                 let pov = app.pov();
-                let spectating = app.game.local.map_or(true, |li| !app.game.players[li].alive);
+                let spectating = app.game.local.is_none_or(|li| !app.game.players[li].alive);
                 hud::draw(&hud::HudState {
                     game: &app.game,
                     pov,

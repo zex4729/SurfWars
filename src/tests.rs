@@ -51,10 +51,22 @@ fn surfs_a_ramp() {
         // so hold A (moveleft = -sidemove) which is +y when looking +x.
         let cmd = UserCmd { msec: 10, sidemove: -400.0, viewangles: vec3(0.0, 0.0, 0.0), ..Default::default() };
         step(&m.world, &vars, &mut s, cmd);
-        if s.is_surfing() { surf_ticks += 1; }
-        if i > 50 { min_x_speed = min_x_speed.min(s.velocity.x); }
+        if s.is_surfing() {
+            surf_ticks += 1;
+        }
+        if i > 50 {
+            min_x_speed = min_x_speed.min(s.velocity.x);
+        }
         if i % 50 == 0 {
-            println!("t={:.2} pos={:?} vel={:?} speed={:.0} surf={} ridge={:.0}", i as f32 * 0.01, s.origin, s.velocity, s.velocity.length(), s.is_surfing(), map::sw_ridge(s.origin.x));
+            println!(
+                "t={:.2} pos={:?} vel={:?} speed={:.0} surf={} ridge={:.0}",
+                i as f32 * 0.01,
+                s.origin,
+                s.velocity,
+                s.velocity.length(),
+                s.is_surfing(),
+                map::sw_ridge(s.origin.x)
+            );
         }
     }
     println!("final pos={:?} vel={:?}", s.origin, s.velocity);
@@ -84,7 +96,10 @@ fn debug_ramp_contact() {
         step(&m.world, &vars, &mut s, cmd);
         if i >= 85 {
             let tr = m.world.trace(before.origin, before.origin + before.velocity * 0.01, s.mins(), s.maxs());
-            println!("i={} pos={:?} vel={:?} tr.frac={} n={:?} ss={} as={} brush={:?}", i, s.origin, s.velocity, tr.fraction, tr.normal, tr.startsolid, tr.allsolid, tr.brush);
+            println!(
+                "i={} pos={:?} vel={:?} tr.frac={} n={:?} ss={} as={} brush={:?}",
+                i, s.origin, s.velocity, tr.fraction, tr.normal, tr.startsolid, tr.allsolid, tr.brush
+            );
         }
     }
 }
@@ -94,11 +109,20 @@ fn debug_ramp_contact() {
 fn bot_routes() {
     use crate::game::*;
     for mapname in crate::map::map_names() {
-        let settings = Settings { map: mapname.to_string(), player_team: None, bots_t: 1, bots_ct: 0, mode: Mode::Deathmatch, ..Default::default() };
+        let settings = Settings {
+            map: mapname.to_string(),
+            player_team: None,
+            bots_t: 1,
+            bots_ct: 0,
+            mode: Mode::Deathmatch,
+            ..Default::default()
+        };
         let probe = Game::new(settings.clone(), 1);
         let nroutes = probe.map.routes.len();
         for ri in 0..nroutes {
-            if probe.map.routes[ri].team != crate::map::Team::T { continue; }
+            if probe.map.routes[ri].team != crate::map::Team::T {
+                continue;
+            }
             let mut g = Game::new(settings.clone(), 7 + ri as u64);
             g.players[0].bot.as_mut().unwrap().force_route = Some(ri);
             g.players[0].bot.as_mut().unwrap().on_spawn();
@@ -110,22 +134,51 @@ fn bot_routes() {
             for tick in 0..3000 {
                 g.step(None);
                 for e in g.events.drain(..) {
-                    if let Event::Teleport { .. } = e { if first_tp.is_none() { first_tp = Some(g.time); } }
+                    if let Event::Teleport { .. } = e {
+                        if first_tp.is_none() {
+                            first_tp = Some(g.time);
+                        }
+                    }
                 }
                 let p = &g.players[0];
                 let b = p.bot.as_ref().unwrap();
                 if first_tp.is_none() {
                     max_wp = max_wp.max(b.wp);
                     max_speed = max_speed.max(p.pm.velocity.length());
-                    if p.pm.is_surfing() { surf_ticks += 1; }
+                    if p.pm.is_surfing() {
+                        surf_ticks += 1;
+                    }
                 }
                 if tick % 50 == 0 && first_tp.is_none() {
-                    log += &format!("  t={:.1} wp={} pos=({:.0},{:.0},{:.0}) v=({:.0},{:.0},{:.0}) ground={} surf={}\n", g.time, b.wp, p.pm.origin.x, p.pm.origin.y, p.pm.origin.z, p.pm.velocity.x, p.pm.velocity.y, p.pm.velocity.z, p.pm.onground, p.pm.is_surfing());
+                    log += &format!(
+                        "  t={:.1} wp={} pos=({:.0},{:.0},{:.0}) v=({:.0},{:.0},{:.0}) ground={} surf={}\n",
+                        g.time,
+                        b.wp,
+                        p.pm.origin.x,
+                        p.pm.origin.y,
+                        p.pm.origin.z,
+                        p.pm.velocity.x,
+                        p.pm.velocity.y,
+                        p.pm.velocity.z,
+                        p.pm.onground,
+                        p.pm.is_surfing()
+                    );
                 }
             }
             let r = &g.map.routes[ri];
-            println!("{} / {:<24} reached wp {}/{} first_teleport={:?} max_speed={:.0} surf={:.1}s", mapname, r.name, max_wp, r.points.len(), first_tp.map(|t| (t*10.0).round()/10.0), max_speed, surf_ticks as f32 * 0.01);
-            if std::env::var("BOTLOG").map_or(false, |v| r.name.contains(&v)) { println!("{log}"); }
+            println!(
+                "{} / {:<24} reached wp {}/{} first_teleport={:?} max_speed={:.0} surf={:.1}s",
+                mapname,
+                r.name,
+                max_wp,
+                r.points.len(),
+                first_tp.map(|t| (t * 10.0).round() / 10.0),
+                max_speed,
+                surf_ticks as f32 * 0.01
+            );
+            if std::env::var("BOTLOG").map_or(false, |v| r.name.contains(&v)) {
+                println!("{log}");
+            }
         }
     }
 }
@@ -133,7 +186,14 @@ fn bot_routes() {
 #[test]
 fn debug_slowdown() {
     use crate::game::*;
-    let settings = Settings { map: "surf_wars".into(), player_team: None, bots_t: 1, bots_ct: 0, mode: Mode::Deathmatch, ..Default::default() };
+    let settings = Settings {
+        map: "surf_wars".into(),
+        player_team: None,
+        bots_t: 1,
+        bots_ct: 0,
+        mode: Mode::Deathmatch,
+        ..Default::default()
+    };
     let mut g = Game::new(settings, 7);
     g.players[0].bot.as_mut().unwrap().force_route = Some(0);
     g.players[0].bot.as_mut().unwrap().on_spawn();
@@ -143,7 +203,10 @@ fn debug_slowdown() {
         let p = &g.players[0];
         let sp = p.pm.velocity.length();
         if last_speed - sp > 40.0 {
-            println!("t={:.2} pos={:?} v={:?} sp {} -> {} surfn={:?}", g.time, p.pm.origin, p.pm.velocity, last_speed, sp, p.pm.surf_normal);
+            println!(
+                "t={:.2} pos={:?} v={:?} sp {} -> {} surfn={:?}",
+                g.time, p.pm.origin, p.pm.velocity, last_speed, sp, p.pm.surf_normal
+            );
         }
         last_speed = sp;
     }
@@ -152,7 +215,14 @@ fn debug_slowdown() {
 #[test]
 fn debug_seam() {
     use crate::game::*;
-    let settings = Settings { map: "surf_wars".into(), player_team: None, bots_t: 1, bots_ct: 0, mode: Mode::Deathmatch, ..Default::default() };
+    let settings = Settings {
+        map: "surf_wars".into(),
+        player_team: None,
+        bots_t: 1,
+        bots_ct: 0,
+        mode: Mode::Deathmatch,
+        ..Default::default()
+    };
     let mut g = Game::new(settings, 8);
     let ri = g.map.routes.iter().position(|r| r.name == "lane north outer").unwrap();
     g.players[0].bot.as_mut().unwrap().force_route = Some(ri);
@@ -164,9 +234,25 @@ fn debug_seam() {
         let p = &g.players[0];
         let sp = p.pm.velocity.length();
         if last_speed - sp > 100.0 {
-            let tr = g.map.world.trace(before.origin, before.origin + before.velocity * 0.01, before.mins(), before.maxs());
-            println!("t={:.2} pos={:?} v={:?} sp {} -> {} | before v={:?} tr frac={} n={:?} brush={:?} ss={}", g.time, p.pm.origin, p.pm.velocity, last_speed, sp, before.velocity, tr.fraction, tr.normal, tr.brush, tr.startsolid);
-            if let Some(bi) = tr.brush { let b = &g.map.world.brushes[bi]; println!("   brush mins={:?} maxs={:?}", b.mins, b.maxs); }
+            let tr =
+                g.map.world.trace(before.origin, before.origin + before.velocity * 0.01, before.mins(), before.maxs());
+            println!(
+                "t={:.2} pos={:?} v={:?} sp {} -> {} | before v={:?} tr frac={} n={:?} brush={:?} ss={}",
+                g.time,
+                p.pm.origin,
+                p.pm.velocity,
+                last_speed,
+                sp,
+                before.velocity,
+                tr.fraction,
+                tr.normal,
+                tr.brush,
+                tr.startsolid
+            );
+            if let Some(bi) = tr.brush {
+                let b = &g.map.world.brushes[bi];
+                println!("   brush mins={:?} maxs={:?}", b.mins, b.maxs);
+            }
         }
         last_speed = sp;
     }
@@ -177,7 +263,14 @@ fn debug_seam() {
 fn bot_match() {
     use crate::game::*;
     for mapname in crate::map::map_names() {
-        let settings = Settings { map: mapname.to_string(), player_team: None, bots_t: 5, bots_ct: 5, mode: Mode::Rounds, ..Default::default() };
+        let settings = Settings {
+            map: mapname.to_string(),
+            player_team: None,
+            bots_t: 5,
+            bots_ct: 5,
+            mode: Mode::Rounds,
+            ..Default::default()
+        };
         let mut g = Game::new(settings, 42);
         let mut shots = 0;
         let mut hits = 0;
@@ -201,7 +294,9 @@ fn bot_match() {
         }
         let el = start.elapsed().as_secs_f64();
         println!("{mapname}: {secs}s sim in {el:.2}s ({:.0}x realtime) rounds={rounds} score={:?} shots={shots} hits={hits} kills={kills} teleports={teleports}", secs / el, g.score);
-        for p in &g.players { println!("   {:<16} {:?} k={} d={}", p.name, p.team, p.kills, p.deaths); }
+        for p in &g.players {
+            println!("   {:<16} {:?} k={} d={}", p.name, p.team, p.kills, p.deaths);
+        }
         assert!(rounds >= 2 && kills > 5);
     }
 }
@@ -212,7 +307,14 @@ fn idle_human_long_run() {
     use crate::game::*;
     for mode in [Mode::Rounds, Mode::Deathmatch] {
         for mapname in crate::map::map_names() {
-            let settings = Settings { map: mapname.to_string(), player_team: Some(crate::map::Team::CT), bots_t: 5, bots_ct: 4, mode, ..Default::default() };
+            let settings = Settings {
+                map: mapname.to_string(),
+                player_team: Some(crate::map::Team::CT),
+                bots_t: 5,
+                bots_ct: 4,
+                mode,
+                ..Default::default()
+            };
             let mut g = Game::new(settings, 3);
             let mut rounds = 0;
             let mut local_deaths = 0;
@@ -228,7 +330,10 @@ fn idle_human_long_run() {
                 }
             }
             let kills: i32 = g.players.iter().map(|p| p.kills).sum();
-            println!("{mapname} {:?}: rounds={rounds} score={:?} total kills={kills} local deaths={local_deaths}", mode, g.score);
+            println!(
+                "{mapname} {:?}: rounds={rounds} score={:?} total kills={kills} local deaths={local_deaths}",
+                mode, g.score
+            );
             assert!(kills > 10);
         }
     }
@@ -239,7 +344,14 @@ fn shot_stats() {
     use crate::game::*;
     use std::collections::HashMap;
     for mapname in crate::map::map_names() {
-        let settings = Settings { map: mapname.to_string(), player_team: None, bots_t: 5, bots_ct: 5, mode: Mode::Deathmatch, ..Default::default() };
+        let settings = Settings {
+            map: mapname.to_string(),
+            player_team: None,
+            bots_t: 5,
+            bots_ct: 5,
+            mode: Mode::Deathmatch,
+            ..Default::default()
+        };
         let mut g = Game::new(settings, 11);
         let mut stats: HashMap<(String, bool), (u32, u32, f32)> = HashMap::new();
         let mut kills_by: HashMap<String, u32> = HashMap::new();
@@ -249,24 +361,60 @@ fn shot_stats() {
         let mut air_time = 0.0;
         while g.time < 600.0 {
             // who is shooting from where
-            let before: Vec<(bool, u32)> = g.players.iter().map(|p| (p.pm.onground, p.weapon().map_or(0, |w| w.clip))).collect();
+            let before: Vec<(bool, u32)> =
+                g.players.iter().map(|p| (p.pm.onground, p.weapon().map_or(0, |w| w.clip))).collect();
             g.step(None);
-            for p in &g.players { if !p.alive { continue; } if p.pm.onground { ground_time += 0.01 } else if p.pm.is_surfing() { surf_time += 0.01 } else { air_time += 0.01 } }
+            for p in &g.players {
+                if !p.alive {
+                    continue;
+                }
+                if p.pm.onground {
+                    ground_time += 0.01
+                } else if p.pm.is_surfing() {
+                    surf_time += 0.01
+                } else {
+                    air_time += 0.01
+                }
+            }
             let _ = &mut hold_time;
             let mut shots_this_tick: Vec<usize> = vec![];
             for e in g.events.drain(..) {
                 match e {
-                    Event::Shot { player, weapon, .. } => { shots_this_tick.push(player); let k = (format!("{:?}", weapon), before[player].0); let s = stats.entry(k).or_default(); s.0 += 1; }
-                    Event::Hit { attacker, .. } => { let p = &g.players[attacker]; let k = (format!("{:?}", p.active_id()), before[attacker].0); let s = stats.entry(k).or_default(); s.1 += 1; }
-                    Event::Kill { weapon: Some(w), .. } => { *kills_by.entry(format!("{:?}", w)).or_default() += 1; }
+                    Event::Shot { player, weapon, .. } => {
+                        shots_this_tick.push(player);
+                        let k = (format!("{:?}", weapon), before[player].0);
+                        let s = stats.entry(k).or_default();
+                        s.0 += 1;
+                    }
+                    Event::Hit { attacker, .. } => {
+                        let p = &g.players[attacker];
+                        let k = (format!("{:?}", p.active_id()), before[attacker].0);
+                        let s = stats.entry(k).or_default();
+                        s.1 += 1;
+                    }
+                    Event::Kill { weapon: Some(w), .. } => {
+                        *kills_by.entry(format!("{:?}", w)).or_default() += 1;
+                    }
                     _ => {}
                 }
             }
         }
-        println!("== {mapname}: ground {:.0}s surf {:.0}s air {:.0}s (player-seconds)", ground_time, surf_time, air_time);
+        println!(
+            "== {mapname}: ground {:.0}s surf {:.0}s air {:.0}s (player-seconds)",
+            ground_time, surf_time, air_time
+        );
         let mut v: Vec<_> = stats.into_iter().collect();
         v.sort_by(|a, b| a.0.cmp(&b.0));
-        for ((w, ground), (shots, hits, _)) in v { println!("  {:<6} {:<7} shots {:>5} hits {:>4} ({:.0}%)", w, if ground {"ground"} else {"air"}, shots, hits, hits as f32 * 100.0 / shots.max(1) as f32); }
+        for ((w, ground), (shots, hits, _)) in v {
+            println!(
+                "  {:<6} {:<7} shots {:>5} hits {:>4} ({:.0}%)",
+                w,
+                if ground { "ground" } else { "air" },
+                shots,
+                hits,
+                hits as f32 * 100.0 / shots.max(1) as f32
+            );
+        }
         println!("  kills by weapon: {:?}", kills_by);
     }
 }

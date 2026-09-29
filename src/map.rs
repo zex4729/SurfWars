@@ -145,7 +145,6 @@ pub struct Map {
     pub fog_color: [f32; 3],
     pub fog_start: f32,
     pub fog_end: f32,
-    pub water_z: f32,
 }
 
 impl Map {
@@ -239,22 +238,12 @@ fn mirror_route(r: &Route) -> Route {
         team: r.team.other(),
         kind: r.kind,
         name: r.name.clone(),
-        points: r
-            .points
-            .iter()
-            .map(|w| Waypoint {
-                pos: mirror_point(w.pos),
-                mode: w.mode,
-            })
-            .collect(),
+        points: r.points.iter().map(|w| Waypoint { pos: mirror_point(w.pos), mode: w.mode }).collect(),
     }
 }
 
 fn wp(x: f32, y: f32, z: f32, mode: WpMode) -> Waypoint {
-    Waypoint {
-        pos: vec3(x, y, z),
-        mode,
-    }
+    Waypoint { pos: vec3(x, y, z), mode }
 }
 
 const RAMP_A: Mat = Mat::new(Tex::Grid, [70, 170, 235]);
@@ -318,16 +307,7 @@ fn surf_wars() -> Map {
     for (yc, mat) in [(SW_LANE_Y, RAMP_A), (-SW_LANE_Y, RAMP_B)] {
         let xs = [-4400.0, -3400.0, -500.0, 500.0, 3400.0, 4400.0];
         for w in xs.windows(2) {
-            b.push(ramp_x(
-                w[0],
-                w[1],
-                yc,
-                sw_ridge(w[0]),
-                sw_ridge(w[1]),
-                LANE_HALF_WIDTH,
-                LANE_HEIGHT,
-                mat,
-            ));
+            b.push(ramp_x(w[0], w[1], yc, sw_ridge(w[0]), sw_ridge(w[1]), LANE_HALF_WIDTH, LANE_HEIGHT, mat));
         }
     }
 
@@ -335,11 +315,7 @@ fn surf_wars() -> Map {
     for s in [-1.0f32, 1.0] {
         let x0 = s * 4700.0;
         let x1 = s * 4764.0;
-        b.push(cuboid(
-            vec3(x0.min(x1), -2000.0, 0.0),
-            vec3(x0.max(x1), 2000.0, 2900.0),
-            CONCRETE,
-        ));
+        b.push(cuboid(vec3(x0.min(x1), -2000.0, 0.0), vec3(x0.max(x1), 2000.0, 2900.0), CONCRETE));
     }
 
     for (s, team_mat, trim) in [(-1.0f32, SPAWN_T, TRIM_T), (1.0, SPAWN_CT, TRIM_CT)] {
@@ -349,25 +325,13 @@ fn surf_wars() -> Map {
 
         // Spawn platform.
         let (a, c) = (fx(4400.0), fx(3500.0));
-        b.push(cuboid(
-            vec3(lo(a, c), -900.0, SW_SPAWN_Z - 64.0),
-            vec3(hi(a, c), 900.0, SW_SPAWN_Z),
-            team_mat,
-        ));
+        b.push(cuboid(vec3(lo(a, c), -900.0, SW_SPAWN_Z - 64.0), vec3(hi(a, c), 900.0, SW_SPAWN_Z), team_mat));
         // Back wall.
         let (a, c) = (fx(4400.0), fx(4464.0));
-        b.push(cuboid(
-            vec3(lo(a, c), -1900.0, SW_SPAWN_Z - 64.0),
-            vec3(hi(a, c), 1900.0, SW_SPAWN_Z + 320.0),
-            trim,
-        ));
+        b.push(cuboid(vec3(lo(a, c), -1900.0, SW_SPAWN_Z - 64.0), vec3(hi(a, c), 1900.0, SW_SPAWN_Z + 320.0), trim));
         // Support column under the platform.
         let (a, c) = (fx(4350.0), fx(4100.0));
-        b.push(cuboid(
-            vec3(lo(a, c), -150.0, 0.0),
-            vec3(hi(a, c), 150.0, SW_SPAWN_Z - 64.0),
-            CONCRETE,
-        ));
+        b.push(cuboid(vec3(lo(a, c), -150.0, 0.0), vec3(hi(a, c), 150.0, SW_SPAWN_Z - 64.0), CONCRETE));
         // Bridges to the side bunny hop paths.
         for ys in [-1.0f32, 1.0] {
             let (a, c) = (fx(4400.0), fx(4000.0));
@@ -379,11 +343,7 @@ fn surf_wars() -> Map {
             ));
             // railing on the outside of the bridge
             let (y0, y1) = (ys * 2150.0, ys * 2214.0);
-            b.push(cuboid(
-                vec3(lo(a, c), lo(y0, y1), SW_SPAWN_Z),
-                vec3(hi(a, c), hi(y0, y1), SW_SPAWN_Z + 48.0),
-                trim,
-            ));
+            b.push(cuboid(vec3(lo(a, c), lo(y0, y1), SW_SPAWN_Z), vec3(hi(a, c), hi(y0, y1), SW_SPAWN_Z + 48.0), trim));
         }
         // Cover on the spawn.
         for (x, y) in [(3800.0, 450.0), (3800.0, -450.0), (4300.0, 760.0)] {
@@ -435,13 +395,9 @@ fn surf_wars() -> Map {
     // Middle island.
     b.push(cuboid(vec3(-700.0, -420.0, 936.0), vec3(700.0, 420.0, 1000.0), METAL));
     b.push(cuboid(vec3(-200.0, -200.0, 0.0), vec3(200.0, 200.0, 936.0), CONCRETE));
-    for (x, y, h) in [
-        (0.0, 0.0, 40.0),
-        (-380.0, 220.0, 32.0),
-        (380.0, -220.0, 32.0),
-        (-380.0, -250.0, 28.0),
-        (380.0, 250.0, 28.0),
-    ] {
+    for (x, y, h) in
+        [(0.0, 0.0, 40.0), (-380.0, 220.0, 32.0), (380.0, -220.0, 32.0), (-380.0, -250.0, 28.0), (380.0, 250.0, 28.0)]
+    {
         b.push(block(x, y, h, 1000.0, 1000.0 + h * 2.0, CRATE));
     }
     b.push(cuboid(vec3(-24.0, -300.0, 1000.0), vec3(24.0, -120.0, 1060.0), METAL));
@@ -454,10 +410,8 @@ fn surf_wars() -> Map {
     for (ti, s) in [(0usize, -1.0f32), (1, 1.0)] {
         for x in [4250.0, 4050.0] {
             for y in [-600.0, -300.0, 0.0, 300.0, 600.0] {
-                spawns[ti].push(Spawn {
-                    pos: vec3(x * s, y, SW_SPAWN_Z + 37.0),
-                    yaw: if s < 0.0 { 0.0 } else { 180.0 },
-                });
+                spawns[ti]
+                    .push(Spawn { pos: vec3(x * s, y, SW_SPAWN_Z + 37.0), yaw: if s < 0.0 { 0.0 } else { 180.0 } });
             }
         }
     }
@@ -513,12 +467,7 @@ fn surf_wars() -> Map {
         }
         pts.push(wp(-640.0, 0.0, 1000.0, WpMode::Hop));
         pts.push(wp(-300.0, 0.0, 1000.0, WpMode::Hold));
-        routes.push(Route {
-            team: Team::T,
-            kind: RouteKind::Bhop,
-            name: "mid pillars".into(),
-            points: pts,
-        });
+        routes.push(Route { team: Team::T, kind: RouteKind::Bhop, name: "mid pillars".into(), points: pts });
     }
     // Side paths to the towers.
     for ys in [1.0f32, -1.0] {
@@ -558,7 +507,6 @@ fn surf_wars() -> Map {
         fog_color: [0.72, 0.80, 0.90],
         fog_start: 3000.0,
         fog_end: 14000.0,
-        water_z: 120.0,
     }
 }
 
@@ -590,25 +538,13 @@ fn surf_canyon() -> Map {
     b.push(cuboid(vec3(-5600.0, -3400.0, 0.0), vec3(5600.0, 3400.0, 120.0), WATER));
 
     // Three parallel lanes: a central wide one and two narrower outside.
-    let lanes: [(f32, f32, f32, Mat); 3] = [
-        (0.0, 620.0, 930.0, RAMP_C),
-        (1750.0, 512.0, 768.0, RAMP_A),
-        (-1750.0, 512.0, 768.0, RAMP_B),
-    ];
+    let lanes: [(f32, f32, f32, Mat); 3] =
+        [(0.0, 620.0, 930.0, RAMP_C), (1750.0, 512.0, 768.0, RAMP_A), (-1750.0, 512.0, 768.0, RAMP_B)];
     let xs = [-4600.0, -3600.0, -900.0, 900.0, 3600.0, 4600.0];
     for (yc, hw, h, mat) in lanes {
         let offset = if yc == 0.0 { 0.0 } else { -150.0 };
         for w in xs.windows(2) {
-            b.push(ramp_x(
-                w[0],
-                w[1],
-                yc,
-                sc_main_ridge(w[0]) + offset,
-                sc_main_ridge(w[1]) + offset,
-                hw,
-                h,
-                mat,
-            ));
+            b.push(ramp_x(w[0], w[1], yc, sc_main_ridge(w[0]) + offset, sc_main_ridge(w[1]) + offset, hw, h, mat));
         }
     }
 
@@ -622,17 +558,9 @@ fn surf_canyon() -> Map {
         let lo = |a: f32, c: f32| a.min(c);
         let hi = |a: f32, c: f32| a.max(c);
         let (a, c) = (fx(5400.0), fx(4500.0));
-        b.push(cuboid(
-            vec3(lo(a, c), -2300.0, SC_SPAWN_Z - 64.0),
-            vec3(hi(a, c), 2300.0, SC_SPAWN_Z),
-            team_mat,
-        ));
+        b.push(cuboid(vec3(lo(a, c), -2300.0, SC_SPAWN_Z - 64.0), vec3(hi(a, c), 2300.0, SC_SPAWN_Z), team_mat));
         let (a, c) = (fx(5400.0), fx(5464.0));
-        b.push(cuboid(
-            vec3(lo(a, c), -2300.0, SC_SPAWN_Z - 64.0),
-            vec3(hi(a, c), 2300.0, SC_SPAWN_Z + 320.0),
-            trim,
-        ));
+        b.push(cuboid(vec3(lo(a, c), -2300.0, SC_SPAWN_Z - 64.0), vec3(hi(a, c), 2300.0, SC_SPAWN_Z + 320.0), trim));
         let (a, c) = (fx(5300.0), fx(5000.0));
         b.push(cuboid(vec3(lo(a, c), -200.0, 0.0), vec3(hi(a, c), 200.0, SC_SPAWN_Z - 64.0), CONCRETE));
         for (x, y) in [(4800.0, 1200.0), (4800.0, -1200.0), (5100.0, 0.0), (4700.0, 0.0)] {
@@ -670,10 +598,8 @@ fn surf_canyon() -> Map {
     for (ti, s) in [(0usize, -1.0f32), (1, 1.0)] {
         for x in [5200.0, 5000.0] {
             for y in [-1000.0, -500.0, 0.0, 500.0, 1000.0] {
-                spawns[ti].push(Spawn {
-                    pos: vec3(x * s, y, SC_SPAWN_Z + 37.0),
-                    yaw: if s < 0.0 { 0.0 } else { 180.0 },
-                });
+                spawns[ti]
+                    .push(Spawn { pos: vec3(x * s, y, SC_SPAWN_Z + 37.0), yaw: if s < 0.0 { 0.0 } else { 180.0 } });
             }
         }
     }
@@ -695,19 +621,18 @@ fn surf_canyon() -> Map {
         let depth = 300.0;
         for face in [-1.0f32, 1.0] {
             let face_y = yc + face * depth / slope;
-            let edge_y = if yc == 0.0 {
-                face * 420.0
-            } else {
-                yc + face * 300.0
-            };
+            let edge_y = if yc == 0.0 { face * 420.0 } else { yc + face * 300.0 };
             let pts_start = vec![
                 wp(-5050.0, edge_y.clamp(-2250.0, 2250.0), SC_SPAWN_Z, WpMode::Walk),
                 wp(-4540.0, edge_y.clamp(-2250.0, 2250.0), SC_SPAWN_Z, WpMode::Drop),
             ];
             let mut pts = pts_start;
             for x in [-4300.0, -3600.0, -2400.0, -900.0, 0.0, 900.0, 2400.0, 3600.0, 4550.0] {
-                let z = (sc_main_ridge(x) + offset - depth)
-                    .min(if x > 0.0 { 1500.0 + offset - depth + 40.0 } else { f32::MAX });
+                let z = (sc_main_ridge(x) + offset - depth).min(if x > 0.0 {
+                    1500.0 + offset - depth + 40.0
+                } else {
+                    f32::MAX
+                });
                 pts.push(wp(x, face_y, z, WpMode::Surf));
             }
             routes.push(Route {
@@ -719,10 +644,8 @@ fn surf_canyon() -> Map {
         }
     }
     for ys in [-1.0f32, 1.0] {
-        let mut pts = vec![
-            wp(-4800.0, ys * 900.0, SC_SPAWN_Z, WpMode::Walk),
-            wp(-4560.0, ys * 900.0, SC_SPAWN_Z, WpMode::Walk),
-        ];
+        let mut pts =
+            vec![wp(-4800.0, ys * 900.0, SC_SPAWN_Z, WpMode::Walk), wp(-4560.0, ys * 900.0, SC_SPAWN_Z, WpMode::Walk)];
         let n = 16;
         for i in 0..n {
             let t = i as f32 / (n - 1) as f32;
@@ -755,6 +678,5 @@ fn surf_canyon() -> Map {
         fog_color: [0.92, 0.70, 0.55],
         fog_start: 2500.0,
         fog_end: 13000.0,
-        water_z: 120.0,
     }
 }

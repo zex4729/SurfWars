@@ -66,7 +66,9 @@ impl Default for Settings {
     }
 }
 
+/// Things that happened during a tick, for sounds and effects.
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub enum Event {
     Shot { player: usize, weapon: WeaponId, pos: Vec3 },
     Tracer { start: Vec3, end: Vec3 },
@@ -256,8 +258,26 @@ pub struct Game {
 }
 
 const BOT_NAMES: [&str; 20] = [
-    "Wavey", "RampRat", "Glider", "Slopey", "Airstrafe", "Bunny", "Skimmer", "Drifter", "Zephyr", "Carver",
-    "Swoop", "Tsunami", "Comet", "Rider", "Breaker", "Kite", "Nimbus", "Vortex", "Ripple", "Jetstream",
+    "Wavey",
+    "RampRat",
+    "Glider",
+    "Slopey",
+    "Airstrafe",
+    "Bunny",
+    "Skimmer",
+    "Drifter",
+    "Zephyr",
+    "Carver",
+    "Swoop",
+    "Tsunami",
+    "Comet",
+    "Rider",
+    "Breaker",
+    "Kite",
+    "Nimbus",
+    "Vortex",
+    "Ripple",
+    "Jetstream",
 ];
 
 impl Game {
@@ -403,9 +423,7 @@ impl Game {
         let ct = self.alive_count(Team::CT);
         let has_t = self.players.iter().any(|p| p.team == Team::T);
         let has_ct = self.players.iter().any(|p| p.team == Team::CT);
-        let winner = if self.time >= self.phase_end {
-            Some(None)
-        } else if has_t && has_ct && t == 0 && ct == 0 {
+        let winner = if self.time >= self.phase_end || (has_t && has_ct && t == 0 && ct == 0) {
             Some(None)
         } else if has_t && has_ct && t == 0 {
             Some(Some(Team::CT))
@@ -563,7 +581,10 @@ impl Game {
                 if let Some(cmd) = local_cmd {
                     self.run_player(i, cmd);
                 } else {
-                    self.run_player(i, UserCmd { msec: TICK_MSEC, viewangles: self.players[i].angles, ..Default::default() });
+                    self.run_player(
+                        i,
+                        UserCmd { msec: TICK_MSEC, viewangles: self.players[i].angles, ..Default::default() },
+                    );
                 }
             }
         }
@@ -659,10 +680,7 @@ impl Game {
         // Triggers.
         let teleport = {
             let p = &self.players[i];
-            self.map
-                .teleports
-                .iter()
-                .any(|z| z.touches(p.pm.origin, p.pm.mins(), p.pm.maxs()))
+            self.map.teleports.iter().any(|z| z.touches(p.pm.origin, p.pm.mins(), p.pm.maxs()))
         };
         if teleport {
             let team = self.players[i].team;
@@ -884,7 +902,7 @@ impl Game {
         let mut best: Option<(f32, HitGroup)> = None;
         let mut consider = |t: Option<f32>, g: HitGroup| {
             if let Some(t) = t {
-                if t >= 0.0 && t <= max && best.map_or(true, |b| t < b.0) {
+                if t >= 0.0 && t <= max && best.is_none_or(|b| t < b.0) {
                     best = Some((t, g));
                 }
             }
@@ -909,7 +927,7 @@ impl Game {
                 continue;
             }
             if let Some((t, g)) = self.ray_player(j, src, dir, wall_dist) {
-                if hit.map_or(true, |h| t < h.1) {
+                if hit.is_none_or(|h| t < h.1) {
                     hit = Some((j, t, g));
                 }
             }
@@ -965,7 +983,7 @@ impl Game {
                 }
             }
             if let Some((t, g)) = r {
-                if hit.map_or(true, |h| t < h.1) {
+                if hit.is_none_or(|h| t < h.1) {
                     hit = Some((j, t, g));
                 }
             }
@@ -990,7 +1008,14 @@ impl Game {
             self.events.push(Event::Impact { pos: wtr.endpos, normal: wtr.normal });
         }
         let p = &mut self.players[i];
-        p.next_attack = now + if stab { 1.1 } else if did_hit { 0.4 } else { 0.35 };
+        p.next_attack = now
+            + if stab {
+                1.1
+            } else if did_hit {
+                0.4
+            } else {
+                0.35
+            };
         p.last_fire = now;
         self.events.push(Event::KnifeSwing { player: i, hit: did_hit });
     }
@@ -1131,9 +1156,7 @@ impl Game {
             }
         }
         let teleports = &self.map.teleports;
-        self.dropped.retain(|d| {
-            now - d.time < 60.0 && !teleports.iter().any(|z| z.touches(d.pos, mins, maxs))
-        });
+        self.dropped.retain(|d| now - d.time < 60.0 && !teleports.iter().any(|z| z.touches(d.pos, mins, maxs)));
     }
 
     fn pickup_weapons(&mut self, i: usize) {

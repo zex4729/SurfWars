@@ -14,11 +14,7 @@ use crate::collision::{CollisionWorld, Trace};
 pub const IN_ATTACK: u32 = 1 << 0;
 pub const IN_JUMP: u32 = 1 << 1;
 pub const IN_DUCK: u32 = 1 << 2;
-pub const IN_FORWARD: u32 = 1 << 3;
-pub const IN_BACK: u32 = 1 << 4;
 pub const IN_USE: u32 = 1 << 5;
-pub const IN_MOVELEFT: u32 = 1 << 9;
-pub const IN_MOVERIGHT: u32 = 1 << 10;
 pub const IN_ATTACK2: u32 = 1 << 11;
 pub const IN_RELOAD: u32 = 1 << 13;
 
@@ -32,6 +28,8 @@ const VEC_HULL_MIN: f32 = -36.0;
 const TIME_TO_DUCK: f32 = 0.4;
 const PLAYER_DUCKING_MULTIPLIER: f32 = 0.333;
 const STOP_EPSILON: f32 = 0.1;
+/// `pmove->friction`, the per player friction multiplier. Always 1 here.
+const PLAYER_FRICTION: f32 = 1.0;
 const MAX_CLIP_PLANES: usize = 5;
 const BUNNYJUMP_MAX_SPEED_FACTOR: f32 = 1.2;
 const PLAYER_FALL_PUNCH_THRESHOLD: f32 = 350.0;
@@ -81,12 +79,7 @@ impl MoveVars {
     /// The usual CS 1.6 surf server configuration: everything stock except
     /// `sv_airaccelerate 100`, `sv_maxvelocity 3500` and no bunny hop cap.
     pub fn surf_server() -> MoveVars {
-        MoveVars {
-            airaccelerate: 100.0,
-            maxvelocity: 3500.0,
-            bhop_cap: false,
-            ..MoveVars::stock()
-        }
+        MoveVars { airaccelerate: 100.0, maxvelocity: 3500.0, bhop_cap: false, ..MoveVars::stock() }
     }
 }
 
@@ -186,11 +179,7 @@ pub fn angle_vectors(angles: Vec3) -> (Vec3, Vec3, Vec3) {
     let (sp, cp) = angles.x.to_radians().sin_cos();
     let (sr, cr) = angles.z.to_radians().sin_cos();
     let forward = vec3(cp * cy, cp * sy, -sp);
-    let right = vec3(
-        -sr * sp * cy + cr * sy,
-        -sr * sp * sy - cr * cy,
-        -sr * cp,
-    );
+    let right = vec3(-sr * sp * cy + cr * sy, -sr * sp * sy - cr * cy, -sr * cp);
     let up = vec3(cr * sp * cy + sr * sy, cr * sp * sy - sr * cy, cr * cp);
     (forward, right, up)
 }
@@ -215,15 +204,7 @@ pub struct PlayerMove<'a> {
 
 impl<'a> PlayerMove<'a> {
     pub fn new(world: &'a CollisionWorld, vars: &'a MoveVars, s: &'a mut PmState, cmd: UserCmd) -> Self {
-        PlayerMove {
-            world,
-            vars,
-            s,
-            cmd,
-            frametime: 0.0,
-            forward: Vec3::X,
-            right: -Vec3::Y,
-        }
+        PlayerMove { world, vars, s, cmd, frametime: 0.0, forward: Vec3::X, right: -Vec3::Y }
     }
 
     fn player_trace(&self, start: Vec3, end: Vec3) -> Trace {
@@ -454,7 +435,10 @@ impl<'a> PlayerMove<'a> {
             let ratio = (100.0 - self.s.fuser2 * 0.001 * 19.0) * 0.01;
             self.s.velocity.z *= ratio;
         }
-        self.s.fuser2 = 1315.789429;
+        #[allow(clippy::excessive_precision)]
+        {
+            self.s.fuser2 = 1315.789429;
+        }
         self.s.jumped = true;
 
         self.fixup_gravity_velocity();
@@ -508,8 +492,7 @@ impl<'a> PlayerMove<'a> {
                     } else {
                         let f_more = VEC_DUCK_HULL_MIN - VEC_HULL_MIN;
                         let duck_fraction = Self::spline_fraction(time, 1.0 / TIME_TO_DUCK);
-                        self.s.view_ofs =
-                            (VEC_DUCK_VIEW - f_more) * duck_fraction + VEC_VIEW * (1.0 - duck_fraction);
+                        self.s.view_ofs = (VEC_DUCK_VIEW - f_more) * duck_fraction + VEC_VIEW * (1.0 - duck_fraction);
                     }
                 }
             } else {
@@ -549,12 +532,9 @@ impl<'a> PlayerMove<'a> {
             let mut stop = start;
             stop.z = start.z - 34.0;
             let tr = self.player_trace(start, stop);
-            let mut friction = if tr.fraction == 1.0 {
-                self.vars.friction * self.vars.edgefriction
-            } else {
-                self.vars.friction
-            };
-            friction *= 1.0; // player friction
+            let mut friction =
+                if tr.fraction == 1.0 { self.vars.friction * self.vars.edgefriction } else { self.vars.friction };
+            friction *= PLAYER_FRICTION;
             let control = if speed < self.vars.stopspeed { self.vars.stopspeed } else { speed };
             drop += control * friction * self.frametime;
         }
@@ -780,7 +760,7 @@ impl<'a> PlayerMove<'a> {
                         new_velocity = Self::clip_velocity(
                             original_velocity,
                             *plane,
-                            1.0 + self.vars.bounce * (1.0 - 1.0),
+                            1.0 + self.vars.bounce * (1.0 - PLAYER_FRICTION),
                         );
                     }
                 }

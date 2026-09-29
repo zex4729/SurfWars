@@ -19,16 +19,7 @@ pub fn team_ui_color(t: Team) -> Color {
 }
 
 pub fn text(s: &str, x: f32, y: f32, size: f32, c: Color) {
-    draw_text_ex(
-        s,
-        x,
-        y,
-        TextParams {
-            font_size: size.round().max(4.0) as u16,
-            color: c,
-            ..Default::default()
-        },
-    );
+    draw_text_ex(s, x, y, TextParams { font_size: size.round().max(4.0) as u16, color: c, ..Default::default() });
 }
 
 pub fn text_shadow(s: &str, x: f32, y: f32, size: f32, c: Color) {
@@ -85,6 +76,9 @@ pub fn draw(h: &HudState) {
         }
     }
 
+    if let Some(p) = pov {
+        draw_radar(g, p, h.view_angles, s);
+    }
     draw_round_info(g, sw, sh, s);
     draw_killfeed(g, sw, s);
 
@@ -98,17 +92,23 @@ pub fn draw(h: &HudState) {
     if g.phase == Phase::Freeze {
         let left = (g.phase_end - g.time).max(0.0).ceil();
         text_centered(&format!("Round starts in {left}"), sw * 0.5, sh * 0.36, 26.0 * s, WHITE);
+        if let Some(p) = pov {
+            if p.primary.is_none() && !h.buy_menu {
+                text_centered("Press B to buy a weapon", sw * 0.5, sh * 0.41, 20.0 * s, HUD_COLOR);
+            }
+        }
     }
 
     if h.spectating {
         let name = pov.map(|p| p.name.as_str()).unwrap_or("-");
-        panel(0.0, sh - 70.0 * s, sw, 70.0 * s);
-        text_centered(&format!("Spectating: {name}"), sw * 0.5, sh - 40.0 * s, 26.0 * s, WHITE);
+        let w = 560.0 * s;
+        panel(sw * 0.5 - w * 0.5, 52.0 * s, w, 56.0 * s);
+        text_centered(&format!("Spectating: {name}"), sw * 0.5, 78.0 * s, 24.0 * s, WHITE);
         text_centered(
             "MOUSE1 / MOUSE2: next / previous player    SPACE: first / third person",
             sw * 0.5,
-            sh - 14.0 * s,
-            16.0 * s,
+            100.0 * s,
+            15.0 * s,
             Color::new(0.8, 0.8, 0.8, 1.0),
         );
     }
@@ -119,7 +119,56 @@ pub fn draw(h: &HudState) {
     if h.show_scores {
         draw_scoreboard(g, sw, sh, s);
     }
-    text(&format!("{} fps", h.fps), 6.0, 14.0 * s, 14.0 * s, Color::new(1.0, 1.0, 1.0, 0.4));
+    text(&format!("{} fps", h.fps), 6.0, sh - 4.0 * s, 13.0 * s, Color::new(1.0, 1.0, 1.0, 0.35));
+}
+
+/// CS style radar: teammates only, rotates with the view.
+fn draw_radar(g: &Game, p: &Player, view: Vec3, s: f32) {
+    let r = 78.0 * s;
+    let cx = 20.0 * s + r;
+    let cy = 30.0 * s + r;
+    let range = 3500.0;
+    draw_circle(cx, cy, r, Color::new(0.0, 0.0, 0.0, 0.45));
+    draw_circle_lines(cx, cy, r, 2.0, Color::new(1.0, 0.69, 0.1, 0.4));
+    draw_line(cx - r, cy, cx + r, cy, 1.0, Color::new(1.0, 1.0, 1.0, 0.12));
+    draw_line(cx, cy - r, cx, cy + r, 1.0, Color::new(1.0, 1.0, 1.0, 0.12));
+    let yaw = view.y.to_radians();
+    let (sn, cs) = yaw.sin_cos();
+    let me = p.pm.origin;
+    for o in g.players.iter() {
+        if !o.alive || o.team != p.team || std::ptr::eq(o, p) {
+            continue;
+        }
+        let d = o.pm.origin - me;
+        // rotate so that our view direction points up on the radar
+        let fwd = d.x * cs + d.y * sn;
+        let left = -d.x * sn + d.y * cs;
+        let mut v = vec2(-left, -fwd) / range * r;
+        if v.length() > r - 4.0 * s {
+            v = v.normalize() * (r - 4.0 * s);
+        }
+        let c = team_ui_color(o.team);
+        let dz = o.pm.origin.z - me.z;
+        let size = 3.5 * s;
+        if dz > 150.0 {
+            draw_triangle(
+                vec2(cx + v.x, cy + v.y - size * 1.4),
+                vec2(cx + v.x - size, cy + v.y + size * 0.8),
+                vec2(cx + v.x + size, cy + v.y + size * 0.8),
+                c,
+            );
+        } else if dz < -150.0 {
+            draw_triangle(
+                vec2(cx + v.x, cy + v.y + size * 1.4),
+                vec2(cx + v.x - size, cy + v.y - size * 0.8),
+                vec2(cx + v.x + size, cy + v.y - size * 0.8),
+                c,
+            );
+        } else {
+            draw_rectangle(cx + v.x - size, cy + v.y - size, size * 2.0, size * 2.0, c);
+        }
+    }
+    draw_triangle(vec2(cx, cy - 6.0 * s), vec2(cx - 4.0 * s, cy + 4.0 * s), vec2(cx + 4.0 * s, cy + 4.0 * s), WHITE);
 }
 
 fn draw_crosshair(p: &Player, sw: f32, sh: f32, s: f32) {
@@ -334,7 +383,7 @@ fn draw_status_text(g: &Game, p: &Player, view: Vec3, sw: f32, sh: f32, s: f32) 
             continue;
         }
         if let Some((t, _)) = g.ray_player(j, eye, f, max) {
-            if best.map_or(true, |b| t < b.1) {
+            if best.is_none_or(|b| t < b.1) {
                 best = Some((j, t));
             }
         }
@@ -360,7 +409,7 @@ fn draw_buy_menu(g: &Game, pov: Option<usize>, _sw: f32, sh: f32, s: f32) {
     let h = line * (ALL_BUYABLE.len() as f32 + 3.2);
     panel(x, y, w, h);
     text_shadow("Buy weapon (free)", x + 14.0 * s, y + 30.0 * s, 24.0 * s, HUD_COLOR);
-    let can_buy = pov.map_or(false, |i| g.in_buyzone(i));
+    let can_buy = pov.is_some_and(|i| g.in_buyzone(i));
     for (i, id) in ALL_BUYABLE.iter().enumerate() {
         let d = id.def();
         let c = if can_buy { WHITE } else { GRAY };
@@ -385,23 +434,11 @@ fn draw_scoreboard(g: &Game, sw: f32, sh: f32, s: f32) {
     let row = 24.0 * s;
     let rows = g.players.len() as f32 + 6.0;
     panel(x, y, w, row * rows);
-    text_shadow(
-        &format!("{}   —   Round {}", g.map.name, g.round),
-        x + 16.0 * s,
-        y + 28.0 * s,
-        22.0 * s,
-        HUD_COLOR,
-    );
+    text_shadow(&format!("{}   —   Round {}", g.map.name, g.round), x + 16.0 * s, y + 28.0 * s, 22.0 * s, HUD_COLOR);
     let mut yy = y + 64.0 * s;
     for team in [Team::T, Team::CT] {
         let c = team_ui_color(team);
-        text_shadow(
-            &format!("{}  —  {}", team.name(), g.score[team.index()]),
-            x + 16.0 * s,
-            yy,
-            20.0 * s,
-            c,
-        );
+        text_shadow(&format!("{}  —  {}", team.name(), g.score[team.index()]), x + 16.0 * s, yy, 20.0 * s, c);
         text("Kills", x + w - 220.0 * s, yy, 16.0 * s, GRAY);
         text("Deaths", x + w - 140.0 * s, yy, 16.0 * s, GRAY);
         yy += row;
@@ -420,8 +457,4 @@ fn draw_scoreboard(g: &Game, sw: f32, sh: f32, s: f32) {
         }
         yy += row * 0.6;
     }
-}
-
-pub fn weapon_hint_name(id: WeaponId) -> &'static str {
-    id.def().name
 }

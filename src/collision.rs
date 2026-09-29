@@ -108,20 +108,13 @@ impl Brush {
         // Build the faces and drop redundant planes.
         let mut faces_d: Vec<(DVec3, f64, Vec<DVec3>)> = Vec::new();
         for &(pn, pd) in &planes {
-            let mut on: Vec<DVec3> = verts
-                .iter()
-                .copied()
-                .filter(|v| (pn.dot(*v) - pd).abs() < BUILD_EPS * 4.0)
-                .collect();
+            let mut on: Vec<DVec3> =
+                verts.iter().copied().filter(|v| (pn.dot(*v) - pd).abs() < BUILD_EPS * 4.0).collect();
             if on.len() < 3 {
                 continue;
             }
             let center = on.iter().fold(DVec3::ZERO, |a, b| a + *b) / on.len() as f64;
-            let t = if pn.z.abs() < 0.99 {
-                DVec3::Z.cross(pn).normalize()
-            } else {
-                DVec3::X.cross(pn).normalize()
-            };
+            let t = if pn.z.abs() < 0.99 { DVec3::Z.cross(pn).normalize() } else { DVec3::X.cross(pn).normalize() };
             let b = pn.cross(t);
             on.sort_by(|a, c| {
                 let da = *a - center;
@@ -188,19 +181,10 @@ impl Brush {
 
         let to_f = |v: DVec3| Vec3::new(v.x as f32, v.y as f32, v.z as f32);
         Some(Brush {
-            planes: coll
-                .iter()
-                .map(|&(n, d)| Plane {
-                    normal: to_f(n),
-                    dist: d as f32,
-                })
-                .collect(),
+            planes: coll.iter().map(|&(n, d)| Plane { normal: to_f(n), dist: d as f32 }).collect(),
             faces: faces_d
                 .iter()
-                .map(|(n, _, v)| Face {
-                    verts: v.iter().map(|p| to_f(*p)).collect(),
-                    normal: to_f(*n),
-                })
+                .map(|(n, _, v)| Face { verts: v.iter().map(|p| to_f(*p)).collect(), normal: to_f(*n) })
                 .collect(),
             mins: to_f(mins),
             maxs: to_f(maxs),
@@ -223,10 +207,7 @@ impl Brush {
 
     /// Convex hull of a small point set (brute force, fine for < 20 points).
     pub fn hull(points: &[Vec3], mat: Mat) -> Brush {
-        let pts: Vec<DVec3> = points
-            .iter()
-            .map(|p| DVec3::new(p.x as f64, p.y as f64, p.z as f64))
-            .collect();
+        let pts: Vec<DVec3> = points.iter().map(|p| DVec3::new(p.x as f64, p.y as f64, p.z as f64)).collect();
         let mut planes: Vec<(DVec3, f64)> = Vec::new();
         let n = pts.len();
         for i in 0..n {
@@ -270,14 +251,8 @@ impl CollisionWorld {
 
     /// Sweeps the box `[mins, maxs]` from `start` to `end`.
     pub fn trace(&self, start: Vec3, end: Vec3, mins: Vec3, maxs: Vec3) -> Trace {
-        let mut tr = Trace {
-            fraction: 1.0,
-            endpos: end,
-            normal: Vec3::ZERO,
-            startsolid: false,
-            allsolid: false,
-            brush: None,
-        };
+        let mut tr =
+            Trace { fraction: 1.0, endpos: end, normal: Vec3::ZERO, startsolid: false, allsolid: false, brush: None };
         let smin = start.min(end) + mins - Vec3::splat(1.0);
         let smax = start.max(end) + maxs + Vec3::splat(1.0);
         for (i, b) in self.brushes.iter().enumerate() {
@@ -317,15 +292,7 @@ impl CollisionWorld {
     }
 }
 
-fn trace_brush(
-    b: &Brush,
-    index: usize,
-    start: Vec3,
-    end: Vec3,
-    mins: Vec3,
-    maxs: Vec3,
-    tr: &mut Trace,
-) {
+fn trace_brush(b: &Brush, index: usize, start: Vec3, end: Vec3, mins: Vec3, maxs: Vec3, tr: &mut Trace) {
     // Entry / exit parameters along the move. The blocking plane is chosen
     // by the exact crossing point; the epsilon back-off is applied after.
     // (Choosing by the backed-off value lets a plane that is nearly parallel

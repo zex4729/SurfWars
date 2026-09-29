@@ -74,10 +74,7 @@ struct Lp {
 
 impl Lp {
     fn new(cutoff: f32) -> Lp {
-        Lp {
-            y: 0.0,
-            a: 1.0 - (-2.0 * std::f32::consts::PI * cutoff / RATE as f32).exp(),
-        }
+        Lp { y: 0.0, a: 1.0 - (-2.0 * std::f32::consts::PI * cutoff / RATE as f32).exp() }
     }
     fn set(&mut self, cutoff: f32) {
         self.a = 1.0 - (-2.0 * std::f32::consts::PI * cutoff / RATE as f32).exp();
@@ -282,9 +279,8 @@ fn synth(sfx: Sfx) -> Vec<f32> {
             for (i, s) in out.iter_mut().enumerate() {
                 let t = i as f32 / RATE as f32;
                 let tau = std::f32::consts::TAU;
-                let ring = (t * 2350.0 * tau).sin() * 0.5
-                    + (t * 3720.0 * tau).sin() * 0.3
-                    + (t * 5230.0 * tau).sin() * 0.2;
+                let ring =
+                    (t * 2350.0 * tau).sin() * 0.5 + (t * 3720.0 * tau).sin() * 0.3 + (t * 5230.0 * tau).sin() * 0.2;
                 *s = ring * (-t / 0.09).exp();
             }
             thud(&mut out, 0.0, 90.0, 0.02, 0.8, &mut rng);

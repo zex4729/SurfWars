@@ -4,8 +4,8 @@
 use std::collections::VecDeque;
 
 use macroquad::miniquad::{
-    BlendFactor, BlendState, BlendValue, Comparison, CullFace, Equation, MipmapFilterMode, PassAction,
-    PipelineParams, TextureFormat, TextureKind, TextureParams, TextureWrap, UniformDesc, UniformType,
+    BlendFactor, BlendState, BlendValue, Comparison, CullFace, Equation, MipmapFilterMode, PassAction, PipelineParams,
+    TextureFormat, TextureKind, TextureParams, TextureWrap, UniformDesc, UniformType,
 };
 use macroquad::prelude::*;
 
@@ -245,14 +245,7 @@ impl Textures {
             let a = (1.0 - r).clamp(0.0, 1.0).powf(2.0);
             [255, 255, 255, (a * 255.0) as u8]
         });
-        Textures {
-            grid,
-            crate_,
-            metal,
-            concrete,
-            water,
-            glow,
-        }
+        Textures { grid, crate_, metal, concrete, water, glow }
     }
 
     fn for_tex(&self, t: Tex) -> &Texture2D {
@@ -291,12 +284,7 @@ pub struct Batch {
 
 impl Batch {
     fn vert(&mut self, p: Vec3, uv: Vec2, c: [u8; 4]) -> u16 {
-        self.verts.push(Vertex {
-            position: p,
-            uv,
-            color: c,
-            normal: Vec4::ZERO,
-        });
+        self.verts.push(Vertex { position: p, uv, color: c, normal: Vec4::ZERO });
         (self.verts.len() - 1) as u16
     }
 
@@ -337,17 +325,6 @@ impl Batch {
             let p = corners.map(|q| m.transform_point3(Vec3::from(q)));
             self.quad(p, [Vec2::ZERO; 4], c);
         }
-    }
-
-    /// Box from a center, three half axes and a color.
-    pub fn obox(&mut self, center: Vec3, ax: Vec3, ay: Vec3, az: Vec3, color: Vec3) {
-        let m = Mat4::from_cols(
-            (ax * 2.0).extend(0.0),
-            (ay * 2.0).extend(0.0),
-            (az * 2.0).extend(0.0),
-            center.extend(1.0),
-        );
-        self.cube(&m, color);
     }
 
     /// Camera facing sprite (uses the glow texture).
@@ -461,10 +438,7 @@ impl Renderer {
     pub fn new(game: &Game) -> Renderer {
         let tex = Textures::new();
         let world_mat = load_material(
-            ShaderSource::Glsl {
-                vertex: WORLD_VS,
-                fragment: WORLD_FS,
-            },
+            ShaderSource::Glsl { vertex: WORLD_VS, fragment: WORLD_FS },
             MaterialParams {
                 pipeline_params: PipelineParams {
                     depth_test: Comparison::LessOrEqual,
@@ -487,10 +461,7 @@ impl Renderer {
         )
         .expect("world shader");
         let fx_mat = load_material(
-            ShaderSource::Glsl {
-                vertex: FX_VS,
-                fragment: FX_FS,
-            },
+            ShaderSource::Glsl { vertex: FX_VS, fragment: FX_FS },
             MaterialParams {
                 pipeline_params: PipelineParams {
                     depth_test: Comparison::LessOrEqual,
@@ -509,10 +480,7 @@ impl Renderer {
         )
         .expect("fx shader");
         let alpha_mat = load_material(
-            ShaderSource::Glsl {
-                vertex: FX_VS,
-                fragment: FX_FS,
-            },
+            ShaderSource::Glsl { vertex: FX_VS, fragment: FX_FS },
             MaterialParams {
                 pipeline_params: PipelineParams {
                     depth_test: Comparison::LessOrEqual,
@@ -575,11 +543,7 @@ impl Renderer {
                 if b.mat.tex == Tex::Water && n.z < 0.9 {
                     continue;
                 }
-                let t = if n.z.abs() < 0.99 {
-                    Vec3::Z.cross(n).normalize()
-                } else {
-                    Vec3::X
-                };
+                let t = if n.z.abs() < 0.99 { Vec3::Z.cross(n).normalize() } else { Vec3::X };
                 let bt = n.cross(t);
                 let (scale, fit) = match b.mat.tex {
                     Tex::Crate => (1.0, true),
@@ -603,11 +567,7 @@ impl Renderer {
                 if g.1.len() + f.verts.len() > MAX_VERTS {
                     let verts = std::mem::take(&mut g.1);
                     let idx = std::mem::take(&mut g.2);
-                    g.3.push(Mesh {
-                        vertices: verts,
-                        indices: idx,
-                        texture: None,
-                    });
+                    g.3.push(Mesh { vertices: verts, indices: idx, texture: None });
                 }
                 let start = g.1.len() as u16;
                 for v in &f.verts {
@@ -615,19 +575,11 @@ impl Renderer {
                     let depth = ((v.z - 100.0) / 2200.0).clamp(0.0, 1.0);
                     let c = base * s * (0.72 + 0.28 * depth);
                     let uv = if fit {
-                        vec2(
-                            (v.dot(t) - umin) / (umax - umin).max(1.0),
-                            (v.dot(bt) - vmin) / (vmax - vmin).max(1.0),
-                        )
+                        vec2((v.dot(t) - umin) / (umax - umin).max(1.0), (v.dot(bt) - vmin) / (vmax - vmin).max(1.0))
                     } else {
                         vec2(v.dot(t) * scale, -v.dot(bt) * scale)
                     };
-                    g.1.push(Vertex {
-                        position: *v,
-                        uv,
-                        color: rgba(c, 1.0),
-                        normal: vec4(n.x, n.y, n.z, flag),
-                    });
+                    g.1.push(Vertex { position: *v, uv, color: rgba(c, 1.0), normal: vec4(n.x, n.y, n.z, flag) });
                 }
                 for i in 1..(f.verts.len() - 1) {
                     g.2.extend_from_slice(&[start, start + i as u16, start + i as u16 + 1]);
@@ -636,11 +588,7 @@ impl Renderer {
         }
         for (tex, verts, idx, mut meshes) in groups {
             if !idx.is_empty() {
-                meshes.push(Mesh {
-                    vertices: verts,
-                    indices: idx,
-                    texture: None,
-                });
+                meshes.push(Mesh { vertices: verts, indices: idx, texture: None });
             }
             let t = self.tex.for_tex(tex).clone();
             for m in meshes.iter_mut() {
@@ -657,24 +605,17 @@ impl Renderer {
             match e {
                 Event::Tracer { start, end } => {
                     if self.rng.chance(0.5) {
-                        self.tracers.push(Tracer {
-                            a: *start,
-                            b: *end,
-                            t0: now,
-                        });
+                        self.tracers.push(Tracer { a: *start, b: *end, t0: now });
                     }
                 }
                 Event::Impact { pos, normal } => {
-                    self.decals.push_back(Decal {
-                        pos: *pos + *normal * 0.6,
-                        normal: *normal,
-                        t0: now,
-                    });
+                    self.decals.push_back(Decal { pos: *pos + *normal * 0.6, normal: *normal, t0: now });
                     if self.decals.len() > 150 {
                         self.decals.pop_front();
                     }
                     for _ in 0..6 {
-                        let v = (*normal + vec3(self.rng.range(-0.7, 0.7), self.rng.range(-0.7, 0.7), self.rng.range(-0.3, 0.9)))
+                        let v = (*normal
+                            + vec3(self.rng.range(-0.7, 0.7), self.rng.range(-0.7, 0.7), self.rng.range(-0.3, 0.9)))
                             * self.rng.range(120.0, 320.0);
                         self.particles.push(Particle {
                             pos: *pos,
@@ -705,11 +646,7 @@ impl Renderer {
                 }
                 Event::Teleport { player } => {
                     let p = &game.players[*player];
-                    self.rings.push(Ring {
-                        pos: p.pm.feet(),
-                        t0: now,
-                        color: team_color(p.team),
-                    });
+                    self.rings.push(Ring { pos: p.pm.feet(), t0: now, color: team_color(p.team) });
                     if let Some(t) = self.trails.get_mut(*player) {
                         t.clear();
                     }
@@ -737,21 +674,13 @@ impl Renderer {
             z_far: 40000.0,
             ..Default::default()
         };
-        clear_background(Color::new(
-            game.map.fog_color[0],
-            game.map.fog_color[1],
-            game.map.fog_color[2],
-            1.0,
-        ));
+        clear_background(Color::new(game.map.fog_color[0], game.map.fog_color[1], game.map.fog_color[2], 1.0));
         set_camera(&cam);
 
         // Sky dome follows the camera.
         {
-            let mut sky = Mesh {
-                vertices: self.sky.vertices.clone(),
-                indices: self.sky.indices.clone(),
-                texture: None,
-            };
+            let mut sky =
+                Mesh { vertices: self.sky.vertices.clone(), indices: self.sky.indices.clone(), texture: None };
             for v in sky.vertices.iter_mut() {
                 v.position += view.pos;
             }
@@ -770,8 +699,7 @@ impl Renderer {
         let fog = game.map.fog_color;
         self.world_mat.set_uniform("CamPos", view.pos);
         self.world_mat.set_uniform("FogColor", vec3(fog[0], fog[1], fog[2]));
-        self.world_mat
-            .set_uniform("FogParams", vec4(game.map.fog_start, game.map.fog_end, game.time as f32, 900.0));
+        self.world_mat.set_uniform("FogParams", vec4(game.map.fog_start, game.map.fog_end, game.time as f32, 900.0));
         gl_use_material(&self.world_mat);
         for (_, meshes) in &self.world {
             for m in meshes {
@@ -796,8 +724,26 @@ impl Renderer {
         }
         self.solid.flush(None);
 
-        // Decals (alpha blended).
+        // Decals and blob shadows (alpha blended).
         gl_use_material(&self.alpha_mat);
+        for p in game.players.iter() {
+            if !p.alive {
+                continue;
+            }
+            let pos = p.prev_origin.lerp(p.pm.origin, alpha);
+            let tr =
+                game.map.world.trace(pos, pos - vec3(0.0, 0.0, 1200.0), vec3(-4.0, -4.0, -4.0), vec3(4.0, 4.0, 4.0));
+            if !tr.hit() || tr.normal.z < 0.3 {
+                continue;
+            }
+            let d = pos.z - tr.endpos.z;
+            let k = (1.0 - d / 1200.0).clamp(0.0, 1.0);
+            let n = tr.normal;
+            let t = if n.z.abs() < 0.99 { Vec3::Z.cross(n).normalize() } else { Vec3::X };
+            let b = n.cross(t);
+            let at = tr.endpos - vec3(0.0, 0.0, 4.0) + n * 1.5;
+            self.decal.sprite(at, t, b, 22.0 + (1.0 - k) * 20.0, [0, 0, 0, (k * k * 150.0) as u8]);
+        }
         for d in &self.decals {
             let age = (game.time - d.t0) as f32;
             let a = (1.0 - (age - 12.0).max(0.0) / 3.0).clamp(0.0, 1.0);
@@ -809,7 +755,7 @@ impl Renderer {
             self.decal.sprite(d.pos, t, b, 2.6, [20, 18, 16, (a * 230.0) as u8]);
         }
         self.decal.flush(Some(&self.tex.glow));
-        while self.decals.front().map_or(false, |d| game.time - d.t0 > 15.0) {
+        while self.decals.front().is_some_and(|d| game.time - d.t0 > 15.0) {
             self.decals.pop_front();
         }
 
@@ -910,14 +856,14 @@ impl Renderer {
         }
         for (i, p) in game.players.iter().enumerate() {
             let t = &mut self.trails[i];
-            while t.front().map_or(false, |(_, t0)| game.time - t0 > 0.8) {
+            while t.front().is_some_and(|(_, t0)| game.time - t0 > 0.8) {
                 t.pop_front();
             }
             if p.alive && p.board > 0.5 && horizontal(p.pm.velocity).length() > 300.0 {
                 let pos = p.prev_origin.lerp(p.pm.origin, alpha);
                 let (tail, _) = board_frame(p, pos);
                 let tail = tail - board_forward(p) * 26.0;
-                if t.back().map_or(true, |(q, _)| q.distance(tail) > 12.0) {
+                if t.back().is_none_or(|(q, _)| q.distance(tail) > 12.0) {
                     t.push_back((tail, game.time));
                 }
             }
@@ -936,11 +882,7 @@ fn clear_depth() {
     unsafe {
         let mut gl = get_internal_gl();
         gl.flush();
-        gl.quad_context.begin_default_pass(PassAction::Clear {
-            color: None,
-            depth: Some(1.0),
-            stencil: None,
-        });
+        gl.quad_context.begin_default_pass(PassAction::Clear { color: None, depth: Some(1.0), stencil: None });
         gl.quad_context.end_render_pass();
     }
 }
@@ -961,12 +903,7 @@ fn build_sky(game: &Game) -> Mesh {
             let dir = vec3(el.cos() * az.cos(), el.cos() * az.sin(), el.sin());
             let t = (el / std::f32::consts::FRAC_PI_2).clamp(0.0, 1.0).powf(0.6);
             let c = if el < 0.0 { fog.lerp(hor, 1.0 + el / 0.35) } else { hor.lerp(top, t) };
-            verts.push(Vertex {
-                position: dir * r,
-                uv: Vec2::ZERO,
-                color: rgba(c, 1.0),
-                normal: Vec4::ZERO,
-            });
+            verts.push(Vertex { position: dir * r, uv: Vec2::ZERO, color: rgba(c, 1.0), normal: Vec4::ZERO });
         }
     }
     for i in 0..rings {
@@ -976,11 +913,7 @@ fn build_sky(game: &Game) -> Mesh {
             idx.extend_from_slice(&[a, b, a + 1, a + 1, b, b + 1]);
         }
     }
-    Mesh {
-        vertices: verts,
-        indices: idx,
-        texture: None,
-    }
+    Mesh { vertices: verts, indices: idx, texture: None }
 }
 
 // ---------------------------------------------------------------------------
@@ -1013,18 +946,8 @@ fn board_frame(p: &Player, pos: Vec3) -> (Vec3, Vec3) {
 fn team_palette(t: Team) -> (Vec3, Vec3, Vec3, Vec3) {
     // (shirt, vest, pants, head gear)
     match t {
-        Team::T => (
-            vec3(0.62, 0.50, 0.34),
-            vec3(0.45, 0.20, 0.16),
-            vec3(0.33, 0.28, 0.22),
-            vec3(0.18, 0.16, 0.15),
-        ),
-        Team::CT => (
-            vec3(0.25, 0.32, 0.45),
-            vec3(0.16, 0.20, 0.28),
-            vec3(0.20, 0.23, 0.27),
-            vec3(0.22, 0.26, 0.30),
-        ),
+        Team::T => (vec3(0.62, 0.50, 0.34), vec3(0.45, 0.20, 0.16), vec3(0.33, 0.28, 0.22), vec3(0.18, 0.16, 0.15)),
+        Team::CT => (vec3(0.25, 0.32, 0.45), vec3(0.16, 0.20, 0.28), vec3(0.20, 0.23, 0.27), vec3(0.22, 0.26, 0.30)),
     }
 }
 
@@ -1047,7 +970,7 @@ pub fn draw_player(b: &mut Batch, p: &Player, pos: Vec3, time: f64) {
     let mut rot = lean_rotation(p) * yaw;
     if dead_t > 0.0 {
         // topple over backwards
-        rot = rot * Quat::from_rotation_y(-dead_t * 1.45);
+        rot *= Quat::from_rotation_y(-dead_t * 1.45);
     }
     let base = Mat4::from_rotation_translation(rot, feet);
     let part = |b: &mut Batch, center: Vec3, size: Vec3, extra: Quat, color: Vec3| {
@@ -1075,7 +998,13 @@ pub fn draw_player(b: &mut Batch, p: &Player, pos: Vec3, time: f64) {
     } else if !onground && !surfing {
         // Airborne: tuck the legs a little.
         for s in [-1.0f32, 1.0] {
-            part(b, vec3(2.0, s * 5.0, hip - leg_len * 0.45), vec3(7.0, 7.0, leg_len * 0.9), Quat::from_rotation_y(0.35), pants);
+            part(
+                b,
+                vec3(2.0, s * 5.0, hip - leg_len * 0.45),
+                vec3(7.0, 7.0, leg_len * 0.9),
+                Quat::from_rotation_y(0.35),
+                pants,
+            );
             part(b, vec3(6.0, s * 5.0, hip - leg_len * 0.85), vec3(10.0, 7.0, 4.0), Quat::IDENTITY, boots);
         }
     } else {
@@ -1195,16 +1124,8 @@ fn draw_board(b: &mut Batch, fx: &mut Batch, p: &Player, pos: Vec3, time: f64, c
     let tc = team_color(p.team);
     let deck = vec3(0.1, 0.1, 0.12);
     // Outline of the deck: pointed nose, rounded tail.
-    let outline: [(f32, f32); 8] = [
-        (1.0, 0.0),
-        (0.72, 0.62),
-        (0.1, 1.0),
-        (-0.75, 0.9),
-        (-1.0, 0.0),
-        (-0.75, -0.9),
-        (0.1, -1.0),
-        (0.72, -0.62),
-    ];
+    let outline: [(f32, f32); 8] =
+        [(1.0, 0.0), (0.72, 0.62), (0.1, 1.0), (-0.75, 0.9), (-1.0, 0.0), (-0.75, -0.9), (0.1, -1.0), (0.72, -0.62)];
     let pt = |u: f32, v: f32, h: f32| center + f * (u * len) + s * (v * wid) + n * h;
     let top_c = rgba(deck * shade(n), 1.0);
     let side_c = rgba(tc * 0.8, 1.0);
@@ -1261,7 +1182,15 @@ fn draw_board(b: &mut Batch, fx: &mut Batch, p: &Player, pos: Vec3, time: f64, c
 // View model
 
 #[allow(clippy::too_many_arguments)]
-fn draw_viewmodel(b: &mut Batch, fx: &mut Batch, p: &Player, view: &View, time: f64, glow: &Texture2D, fx_mat: &Material) {
+fn draw_viewmodel(
+    b: &mut Batch,
+    fx: &mut Batch,
+    p: &Player,
+    view: &View,
+    time: f64,
+    glow: &Texture2D,
+    fx_mat: &Material,
+) {
     let (f, r, u) = angle_vectors(view.angles);
     let l = -r;
     let id = p.active_id();
@@ -1306,7 +1235,8 @@ fn draw_viewmodel(b: &mut Batch, fx: &mut Batch, p: &Player, view: &View, time: 
     let local = vec3(18.0 - kick * kick_amt * 2.0, -6.5, -7.0 - dip) + bob;
     let origin = view.pos + f * local.x + l * local.y + u * local.z;
     let basis = Mat4::from_cols(f.extend(0.0), l.extend(0.0), u.extend(0.0), origin.extend(1.0));
-    let extra = Quat::from_rotation_y(-(kick * kick_amt * 0.12)) * Quat::from_rotation_x(roll)
+    let extra = Quat::from_rotation_y(-(kick * kick_amt * 0.12))
+        * Quat::from_rotation_x(roll)
         * Quat::from_rotation_z(swing * 0.9)
         * Quat::from_rotation_x(swing * 0.6);
     let m = basis * Mat4::from_quat(extra);
@@ -1318,7 +1248,8 @@ fn draw_viewmodel(b: &mut Batch, fx: &mut Batch, p: &Player, view: &View, time: 
         let mid = (from + to) * 0.5;
         let dir = (to - from).normalize_or_zero();
         let q = Quat::from_rotation_arc(Vec3::X, dir);
-        let mm = m * Mat4::from_rotation_translation(q, mid) * Mat4::from_scale(vec3((to - from).length(), thick, thick));
+        let mm =
+            m * Mat4::from_rotation_translation(q, mid) * Mat4::from_scale(vec3((to - from).length(), thick, thick));
         b.cube(&mm, color);
     };
     let grip = vec3(0.0, 0.0, -0.5);

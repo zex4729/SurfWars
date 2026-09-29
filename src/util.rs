@@ -39,10 +39,6 @@ impl Rng {
     pub fn chance(&mut self, p: f32) -> bool {
         self.f32() < p
     }
-
-    pub fn pick<'a, T>(&mut self, items: &'a [T]) -> &'a T {
-        &items[self.range_u32(0, items.len() as u32 - 1) as usize]
-    }
 }
 
 /// Wraps an angle to (-180, 180].
@@ -66,10 +62,6 @@ pub fn vec_to_angles(dir: Vec3) -> (f32, f32) {
 
 pub fn horizontal(v: Vec3) -> Vec3 {
     vec3(v.x, v.y, 0.0)
-}
-
-pub fn lerp(a: f32, b: f32, t: f32) -> f32 {
-    a + (b - a) * t
 }
 
 pub fn approach(cur: f32, target: f32, step: f32) -> f32 {

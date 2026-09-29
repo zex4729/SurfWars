@@ -43,14 +43,8 @@ pub struct WeaponDef {
     pub kill_icon: &'static str,
 }
 
-pub const ALL_BUYABLE: [WeaponId; 6] = [
-    WeaponId::Usp,
-    WeaponId::M3,
-    WeaponId::Mp5,
-    WeaponId::Ak47,
-    WeaponId::Scout,
-    WeaponId::Awp,
-];
+pub const ALL_BUYABLE: [WeaponId; 6] =
+    [WeaponId::Usp, WeaponId::M3, WeaponId::Mp5, WeaponId::Ak47, WeaponId::Scout, WeaponId::Awp];
 
 impl WeaponId {
     pub fn def(self) -> &'static WeaponDef {

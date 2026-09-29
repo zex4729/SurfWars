@@ -296,11 +296,7 @@ fn air_steer(v: Vec3, desired: Vec3, alt: bool) -> Vec3 {
 pub fn think(g: &Game, i: usize, b: &mut BotBrain) -> UserCmd {
     let now = g.time;
     let p = &g.players[i];
-    let mut cmd = UserCmd {
-        msec: TICK_MSEC,
-        viewangles: b.aim,
-        ..Default::default()
-    };
+    let mut cmd = UserCmd { msec: TICK_MSEC, viewangles: b.aim, ..Default::default() };
     if !p.alive {
         b.aim = p.angles;
         return cmd;
@@ -310,7 +306,6 @@ pub fn think(g: &Game, i: usize, b: &mut BotBrain) -> UserCmd {
     }
     b.alt = !b.alt;
     let sk = skill(b.difficulty);
-    let pos = p.pm.origin;
     let vel = p.pm.velocity;
     let eye = p.pm.eye();
 
@@ -325,7 +320,7 @@ pub fn think(g: &Game, i: usize, b: &mut BotBrain) -> UserCmd {
 
     // ---------------------------------------------------------------
     // Perception
-    if (g.tick + i as u64) % 2 == 0 {
+    if (g.tick + i as u64).is_multiple_of(2) {
         let (fwd, _, _) = angle_vectors(b.aim);
         let mut best: Option<(usize, f32, Vec3)> = None;
         for (j, e) in g.players.iter().enumerate() {
@@ -355,7 +350,7 @@ pub fn think(g: &Game, i: usize, b: &mut BotBrain) -> UserCmd {
             };
             if let Some(pt) = seen {
                 let score = if b.target == Some(j) { d * 0.6 } else { d };
-                if best.map_or(true, |bb| score < bb.1) {
+                if best.is_none_or(|bb| score < bb.1) {
                     best = Some((j, score, pt));
                 }
             }
@@ -402,11 +397,7 @@ pub fn think(g: &Game, i: usize, b: &mut BotBrain) -> UserCmd {
         } else {
             e.pm.origin + vec3(0.0, 0.0, if e.pm.ducking { 0.0 } else { 10.0 })
         };
-        let aim_pt = if target_visible {
-            base + (e.pm.velocity - vel) * (0.05 * sk.lead)
-        } else {
-            b.target_pos
-        };
+        let aim_pt = if target_visible { base + (e.pm.velocity - vel) * (0.05 * sk.lead) } else { b.target_pos };
         let (pitch, yaw) = vec_to_angles(aim_pt - eye);
         desired = vec3(pitch, yaw, 0.0) - p.pm.punchangle * sk.recoil_comp + b.aim_error;
     } else if look_dir.length_squared() > 0.01 {
@@ -446,8 +437,8 @@ fn weapons(g: &Game, i: usize, b: &mut BotBrain, cmd: &mut UserCmd, visible: boo
         return;
     }
     // Pick the right weapon.
-    let primary_ok = p.primary.map_or(false, |w| w.clip + w.reserve > 0);
-    let secondary_ok = p.secondary.map_or(false, |w| w.clip + w.reserve > 0);
+    let primary_ok = p.primary.is_some_and(|w| w.clip + w.reserve > 0);
+    let secondary_ok = p.secondary.is_some_and(|w| w.clip + w.reserve > 0);
     if now >= p.next_attack || p.active == Slot::Melee {
         if primary_ok && p.active != Slot::Primary {
             b.actions.push(BotAction::Switch(Slot::Primary));
@@ -504,9 +495,27 @@ fn weapons(g: &Game, i: usize, b: &mut BotBrain, cmd: &mut UserCmd, visible: boo
     // Don't waste ammo at silly ranges (spread in the air is huge).
     let max_range = match id {
         WeaponId::M3 => 900.0,
-        WeaponId::Usp => if p.pm.onground { 1500.0 } else { 900.0 },
-        WeaponId::Mp5 => if p.pm.onground { 1800.0 } else { 1100.0 },
-        WeaponId::Ak47 => if p.pm.onground { 3000.0 } else { 1500.0 },
+        WeaponId::Usp => {
+            if p.pm.onground {
+                1500.0
+            } else {
+                900.0
+            }
+        }
+        WeaponId::Mp5 => {
+            if p.pm.onground {
+                1800.0
+            } else {
+                1100.0
+            }
+        }
+        WeaponId::Ak47 => {
+            if p.pm.onground {
+                3000.0
+            } else {
+                1500.0
+            }
+        }
         _ => 8000.0,
     };
     if dist > max_range {
@@ -514,7 +523,9 @@ fn weapons(g: &Game, i: usize, b: &mut BotBrain, cmd: &mut UserCmd, visible: boo
     }
     // Snipers only shoot when they are (nearly) standing still.
     let speed = horizontal(p.pm.velocity).length();
-    if (id == WeaponId::Awp && (speed > 140.0 || !p.pm.onground)) || (id == WeaponId::Scout && speed > 170.0 && dist > 500.0) {
+    if (id == WeaponId::Awp && (speed > 140.0 || !p.pm.onground))
+        || (id == WeaponId::Scout && speed > 170.0 && dist > 500.0)
+    {
         return;
     }
     if err > tolerance {
@@ -531,7 +542,7 @@ fn weapons(g: &Game, i: usize, b: &mut BotBrain, cmd: &mut UserCmd, visible: boo
         }
         WeaponId::Ak47 | WeaponId::Mp5 => {
             cmd.buttons |= IN_ATTACK;
-            if now >= p.next_attack && p.weapon().map_or(false, |w| w.clip > 0) {
+            if now >= p.next_attack && p.weapon().is_some_and(|w| w.clip > 0) {
                 b.burst += 1;
                 let max_burst = if dist > 1800.0 {
                     2
@@ -575,11 +586,7 @@ fn movement(g: &Game, i: usize, b: &mut BotBrain, fighting: bool) -> (Vec3, bool
     if b.wp >= route.points.len() {
         // End of the route: head for the exit direction and fall off
         // somewhere; the pit teleports us home and we plan a new route.
-        let dir = if horizontal(vel).length() > 50.0 {
-            horizontal(vel).normalize()
-        } else {
-            b.exit_dir
-        };
+        let dir = if horizontal(vel).length() > 50.0 { horizontal(vel).normalize() } else { b.exit_dir };
         if onground && b.alt && b.rng.chance(0.05) {
             jump = true;
         }
@@ -703,11 +710,7 @@ fn hop(g: &Game, i: usize, b: &mut BotBrain, target: Vec3, mut jump: bool) -> (V
             return (dir * 250.0, jump, false, dir);
         }
         let speed = horizontal(vel).length();
-        let ratio = if p.pm.fuser2 > 0.0 {
-            (100.0 - p.pm.fuser2 * 0.001 * 19.0) * 0.01
-        } else {
-            1.0
-        };
+        let ratio = if p.pm.fuser2 > 0.0 { (100.0 - p.pm.fuser2 * 0.001 * 19.0) * 0.01 } else { 1.0 };
         let v0 = 268.33 * ratio;
         let t = time_to_height(pos.z, v0, stand_z).unwrap_or(0.0);
         let reach_max = (speed.max(200.0) + 90.0 * t) * t;
