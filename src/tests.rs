@@ -84,26 +84,6 @@ fn ray_hits_ramp() {
     let _ = Vec3::ZERO;
 }
 
-#[test]
-fn debug_ramp_contact() {
-    let m = map::load("surf_wars");
-    let vars = MoveVars::surf_server();
-    let mut s = PmState::new(vec3(-3300.0, 850.0, 1850.0));
-    s.velocity = vec3(400.0, 0.0, 0.0);
-    for i in 0..110 {
-        let cmd = UserCmd { msec: 10, sidemove: -400.0, ..Default::default() };
-        let before = s;
-        step(&m.world, &vars, &mut s, cmd);
-        if i >= 85 {
-            let tr = m.world.trace(before.origin, before.origin + before.velocity * 0.01, s.mins(), s.maxs());
-            println!(
-                "i={} pos={:?} vel={:?} tr.frac={} n={:?} ss={} as={} brush={:?}",
-                i, s.origin, s.velocity, tr.fraction, tr.normal, tr.startsolid, tr.allsolid, tr.brush
-            );
-        }
-    }
-}
-
 /// Runs one bot on every T route and reports how far it gets.
 #[test]
 fn bot_routes() {
@@ -183,8 +163,10 @@ fn bot_routes() {
     }
 }
 
+/// Regression test: crossing the seam between two ramp segments must not
+/// act like a wall (the entry plane has to be picked by its exact crossing).
 #[test]
-fn debug_slowdown() {
+fn ramp_seams_do_not_stop_surfers() {
     use crate::game::*;
     let settings = Settings {
         map: "surf_wars".into(),
@@ -194,67 +176,21 @@ fn debug_slowdown() {
         mode: Mode::Deathmatch,
         ..Default::default()
     };
-    let mut g = Game::new(settings, 7);
-    g.players[0].bot.as_mut().unwrap().force_route = Some(0);
-    g.players[0].bot.as_mut().unwrap().on_spawn();
-    let mut last_speed = 0.0;
-    for _ in 0..1300 {
-        g.step(None);
-        let p = &g.players[0];
-        let sp = p.pm.velocity.length();
-        if last_speed - sp > 40.0 {
-            println!(
-                "t={:.2} pos={:?} v={:?} sp {} -> {} surfn={:?}",
-                g.time, p.pm.origin, p.pm.velocity, last_speed, sp, p.pm.surf_normal
-            );
-        }
-        last_speed = sp;
-    }
-}
-
-#[test]
-fn debug_seam() {
-    use crate::game::*;
-    let settings = Settings {
-        map: "surf_wars".into(),
-        player_team: None,
-        bots_t: 1,
-        bots_ct: 0,
-        mode: Mode::Deathmatch,
-        ..Default::default()
-    };
-    let mut g = Game::new(settings, 8);
-    let ri = g.map.routes.iter().position(|r| r.name == "lane north outer").unwrap();
-    g.players[0].bot.as_mut().unwrap().force_route = Some(ri);
-    g.players[0].bot.as_mut().unwrap().on_spawn();
-    let mut last_speed = 0.0;
-    for _ in 0..1600 {
-        let before = g.players[0].pm;
-        g.step(None);
-        let p = &g.players[0];
-        let sp = p.pm.velocity.length();
-        if last_speed - sp > 100.0 {
-            let tr =
-                g.map.world.trace(before.origin, before.origin + before.velocity * 0.01, before.mins(), before.maxs());
-            println!(
-                "t={:.2} pos={:?} v={:?} sp {} -> {} | before v={:?} tr frac={} n={:?} brush={:?} ss={}",
-                g.time,
-                p.pm.origin,
-                p.pm.velocity,
-                last_speed,
-                sp,
-                before.velocity,
-                tr.fraction,
-                tr.normal,
-                tr.brush,
-                tr.startsolid
-            );
-            if let Some(bi) = tr.brush {
-                let b = &g.map.world.brushes[bi];
-                println!("   brush mins={:?} maxs={:?}", b.mins, b.maxs);
+    for name in ["lane north outer", "lane north inner", "lane south outer", "lane south inner"] {
+        let mut g = Game::new(settings.clone(), 8);
+        let ri = g.map.routes.iter().position(|r| r.name == name && r.team == crate::map::Team::T).unwrap();
+        g.players[0].bot.as_mut().unwrap().force_route = Some(ri);
+        g.players[0].bot.as_mut().unwrap().on_spawn();
+        let mut last = 0.0f32;
+        for _ in 0..1600 {
+            g.step(None);
+            let p = &g.players[0];
+            let sp = p.pm.velocity.length();
+            if p.pm.is_surfing() {
+                assert!(last - sp < 300.0, "{name}: speed dropped {last} -> {sp} at {:?}", p.pm.origin);
             }
+            last = sp;
         }
-        last_speed = sp;
     }
 }
 
@@ -416,5 +352,178 @@ fn shot_stats() {
             );
         }
         println!("  kills by weapon: {:?}", kills_by);
+    }
+}
+
+mod weapon_tests {
+    use crate::game::*;
+    use crate::map::Team;
+    use crate::pmove::*;
+    use crate::weapons::*;
+    use macroquad::math::vec3;
+
+    /// Human (T) and one CT bot standing on the T spawn, 300 units apart.
+    fn duel() -> Game {
+        let s = Settings {
+            player_team: Some(Team::T),
+            bots_t: 0,
+            bots_ct: 1,
+            mode: Mode::Deathmatch,
+            ..Default::default()
+        };
+        let mut g = Game::new(s, 5);
+        // let the freeze time pass and put both on the T spawn platform
+        g.players[0].pm = PmState::new(vec3(-4200.0, -300.0, 2436.0));
+        g.players[1].pm = PmState::new(vec3(-3900.0, -300.0, 2436.0));
+        g.players[1].bot = None; // make the target a dummy
+        g
+    }
+
+    fn cmd(g: &Game, buttons: u32) -> UserCmd {
+        // aim at the dummy's chest
+        let me = g.players[0].pm.eye();
+        let target = g.players[1].pm.origin + vec3(0.0, 0.0, 10.0);
+        let (pitch, yaw) = crate::util::vec_to_angles(target - me);
+        UserCmd { msec: 10, viewangles: vec3(pitch, yaw, 0.0), buttons, ..Default::default() }
+    }
+
+    #[test]
+    fn ak_kills_and_reloads() {
+        let mut g = duel();
+        assert!(g.buy(0, WeaponId::Ak47));
+        let mut kills = 0;
+        let mut shots = 0;
+        for _ in 0..400 {
+            let c = cmd(&g, IN_ATTACK);
+            g.step(Some(c));
+            for e in g.events.drain(..) {
+                match e {
+                    Event::Shot { player: 0, .. } => shots += 1,
+                    Event::Kill { victim: 1, .. } => kills += 1,
+                    _ => {}
+                }
+            }
+            if kills > 0 {
+                break;
+            }
+        }
+        assert_eq!(kills, 1, "AK did not kill a stationary target at 300 units ({shots} shots)");
+        assert!(shots <= 12, "took {shots} shots");
+        // empty the magazine, then let go and check the automatic reload
+        let mut emptied = false;
+        for _ in 0..600 {
+            let mut c = cmd(&g, IN_ATTACK);
+            if g.players[0].weapon().unwrap().clip == 0 {
+                emptied = true;
+            }
+            if emptied {
+                c.buttons = 0;
+            }
+            g.step(Some(c));
+        }
+        let w = g.players[0].weapon().unwrap();
+        assert_eq!(w.clip, 30);
+        assert!(w.reserve < 90);
+    }
+
+    #[test]
+    fn usp_is_semi_auto() {
+        let mut g = duel();
+        let mut shots = 0;
+        for _ in 0..200 {
+            let c = cmd(&g, IN_ATTACK);
+            g.step(Some(c));
+            shots += g.events.drain(..).filter(|e| matches!(e, Event::Shot { player: 0, .. })).count();
+        }
+        assert_eq!(shots, 1, "holding the trigger fired {shots} USP shots");
+    }
+
+    #[test]
+    fn awp_scope_resumes_after_shot() {
+        let mut g = duel();
+        g.players[1].health = 1000.0; // keep the dummy alive
+        assert!(g.buy(0, WeaponId::Awp));
+        for _ in 0..150 {
+            let c = cmd(&g, 0);
+            g.step(Some(c));
+        }
+        let c = cmd(&g, IN_ATTACK2);
+        g.step(Some(c));
+        assert_eq!(g.players[0].zoom, 1);
+        assert_eq!(g.players[0].fov(), 40.0);
+        let c = cmd(&g, IN_ATTACK);
+        g.step(Some(c));
+        assert_eq!(g.players[0].zoom, 0, "the AWP unzooms while the bolt cycles");
+        for _ in 0..160 {
+            let c = cmd(&g, 0);
+            g.step(Some(c));
+        }
+        assert_eq!(g.players[0].zoom, 1, "the zoom comes back after the bolt");
+    }
+
+    #[test]
+    fn m3_reloads_shell_by_shell() {
+        let mut g = duel();
+        g.players[1].health = 10000.0;
+        assert!(g.buy(0, WeaponId::M3));
+        for _ in 0..150 {
+            let c = cmd(&g, 0);
+            g.step(Some(c));
+        }
+        let mut pellets_hit = 0;
+        let c = cmd(&g, IN_ATTACK);
+        g.step(Some(c));
+        pellets_hit += g.events.drain(..).filter(|e| matches!(e, Event::Hit { .. })).count();
+        assert!(pellets_hit >= 3, "only {pellets_hit} pellets hit at 300 units");
+        assert_eq!(g.players[0].weapon().unwrap().clip, 7);
+        let c = cmd(&g, IN_RELOAD);
+        for _ in 0..200 {
+            g.step(Some(UserCmd { buttons: IN_RELOAD, ..c }));
+        }
+        let clip = g.players[0].weapon().unwrap().clip;
+        assert_eq!(clip, 8);
+    }
+
+    #[test]
+    fn headshot_multiplier() {
+        let mut g = duel();
+        assert!(g.buy(0, WeaponId::Scout));
+        for _ in 0..150 {
+            let c = cmd(&g, 0);
+            g.step(Some(c));
+        }
+        // aim at the head
+        let me = g.players[0].pm.eye();
+        let head = g.players[1].pm.origin + vec3(0.0, 0.0, 27.0);
+        let (pitch, yaw) = crate::util::vec_to_angles(head - me);
+        g.step(Some(UserCmd {
+            msec: 10,
+            viewangles: vec3(pitch, yaw, 0.0),
+            buttons: IN_ATTACK2,
+            ..Default::default()
+        }));
+        g.step(Some(UserCmd { msec: 10, viewangles: vec3(pitch, yaw, 0.0), ..Default::default() }));
+        g.step(Some(UserCmd { msec: 10, viewangles: vec3(pitch, yaw, 0.0), buttons: IN_ATTACK, ..Default::default() }));
+        let hs = g.events.drain(..).any(|e| matches!(e, Event::Kill { victim: 1, headshot: true, .. }));
+        assert!(hs, "a scoped scout headshot should kill through a helmet");
+    }
+}
+
+/// Stock CS caps bunny hop speed on jump (PM_PreventMegaBunnyJumping); surf
+/// servers remove that.
+#[test]
+fn bhop_cap_only_on_stock_settings() {
+    let m = map::load("surf_wars");
+    for (vars, capped) in [(MoveVars::stock(), true), (MoveVars::surf_server(), false)] {
+        let mut s = PmState::new(vec3(-4300.0, 200.0, 2436.0));
+        s.velocity = vec3(500.0, 0.0, 0.0);
+        step(&m.world, &vars, &mut s, UserCmd { msec: 10, buttons: IN_JUMP, ..Default::default() });
+        let speed = vec3(s.velocity.x, s.velocity.y, 0.0).length();
+        if capped {
+            // 500 > 1.2 * 250, so the velocity is scaled by 300 / 500 * 0.65
+            assert!((speed - 500.0 * 300.0 / 500.0 * 0.65).abs() < 5.0, "stock speed {speed}");
+        } else {
+            assert!(speed > 495.0, "surf speed {speed}");
+        }
     }
 }

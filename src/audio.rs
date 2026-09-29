@@ -418,6 +418,7 @@ pub struct Audio {
     sounds: std::collections::HashMap<Sfx, Sound>,
     pub volume: f32,
     step_toggle: bool,
+    loop_vol: [f32; 2],
     enabled: bool,
 }
 
@@ -429,6 +430,7 @@ impl Audio {
             sounds: std::collections::HashMap::new(),
             volume: 0.7,
             step_toggle: false,
+            loop_vol: [0.0; 2],
             enabled: enabled && cfg!(feature = "audio"),
         };
         #[cfg(feature = "audio")]
@@ -460,11 +462,18 @@ impl Audio {
     }
 
     #[allow(unused_variables)]
-    fn set_loop(&self, sfx: Sfx, vol: f32) {
+    fn set_loop(&mut self, sfx: Sfx, vol: f32) {
+        let slot = if sfx == Sfx::Wind { 0 } else { 1 };
+        let v = (vol * self.volume).clamp(0.0, 1.0);
+        // Only talk to the mixer when the volume really changes.
+        if (v - self.loop_vol[slot]).abs() < 0.02 && !(v == 0.0 && self.loop_vol[slot] != 0.0) {
+            return;
+        }
+        self.loop_vol[slot] = v;
         #[cfg(feature = "audio")]
         if self.enabled {
             if let Some(s) = self.sounds.get(&sfx) {
-                set_sound_volume(s, (vol * self.volume).clamp(0.0, 1.0));
+                set_sound_volume(s, v);
             }
         }
     }

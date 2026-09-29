@@ -139,6 +139,8 @@ pub struct Player {
     pub hurt_from: Vec3,
     pub last_attacker: Option<usize>,
     pub spawn_count: u32,
+    /// Last primary weapon bought; handed out again on respawn.
+    pub last_buy: Option<WeaponId>,
     /// Visual only: fades the hover board in and out.
     pub board: f32,
     pub board_normal: Vec3,
@@ -177,6 +179,7 @@ impl Player {
             hurt_from: Vec3::ZERO,
             last_attacker: None,
             spawn_count: 0,
+            last_buy: None,
             board: 0.0,
             board_normal: Vec3::Z,
         }
@@ -392,7 +395,8 @@ impl Game {
         p.last_attacker = None;
         p.spawn_count += 1;
         if !keep_weapons {
-            p.primary = None;
+            // Like a CSDM gun menu: humans get their last purchase back.
+            p.primary = if p.is_bot() { None } else { p.last_buy.map(Weapon::new) };
             p.secondary = Some(Weapon::new(WeaponId::Usp));
         } else {
             // refill ammo like a surf server would
@@ -454,29 +458,36 @@ impl Game {
         if !self.in_buyzone(idx) {
             return false;
         }
-        let def = id.def();
-        let now = self.time;
+        let slot = id.def().slot;
         let p = &mut self.players[idx];
-        match def.slot {
+        match slot {
             Slot::Primary => {
-                if let Some(old) = p.primary.take() {
-                    if old.id == id {
-                        p.primary = Some(Weapon::new(id));
-                        return true;
-                    }
-                }
                 p.primary = Some(Weapon::new(id));
-                self.switch_weapon(idx, Slot::Primary);
+                p.last_buy = Some(id);
             }
-            Slot::Secondary => {
-                p.secondary = Some(Weapon::new(id));
-                self.switch_weapon(idx, Slot::Secondary);
-            }
-            Slot::Melee => {}
+            Slot::Secondary => p.secondary = Some(Weapon::new(id)),
+            Slot::Melee => return false,
         }
-        let _ = now;
+        self.equip(idx, slot);
         self.events.push(Event::Pickup { player: idx });
         true
+    }
+
+    /// Takes out the weapon in `slot`, playing the deploy even if it is
+    /// already the active slot (after buying a new gun).
+    fn equip(&mut self, idx: usize, slot: Slot) {
+        let now = self.time;
+        let p = &mut self.players[idx];
+        if p.active != slot {
+            p.last_active = p.active;
+        }
+        p.active = slot;
+        p.zoom = 0;
+        p.resume_zoom = None;
+        p.reload_end = None;
+        p.next_attack = now + p.active_id().def().deploy_time as f64;
+        p.deploy_time = now;
+        self.events.push(Event::Deploy { player: idx });
     }
 
     pub fn switch_weapon(&mut self, idx: usize, slot: Slot) {
@@ -485,15 +496,8 @@ impl Game {
         if !p.alive || !p.has_slot(slot) || p.active == slot {
             return;
         }
-        p.last_active = p.active;
-        p.active = slot;
-        p.zoom = 0;
-        p.resume_zoom = None;
-        p.reload_end = None;
-        let deploy = p.active_id().def().deploy_time as f64;
-        p.next_attack = now + deploy;
-        p.deploy_time = now;
-        self.events.push(Event::Deploy { player: idx });
+        let _ = now;
+        self.equip(idx, slot);
     }
 
     pub fn last_weapon(&mut self, idx: usize) {
@@ -782,10 +786,12 @@ impl Game {
             }
         }
 
+        // Pistols fire once per trigger press (CS counts m_iShotsFired,
+        // which resets when the button is released).
         let semi_block = {
             let p = &self.players[i];
             let def = p.active_id().def();
-            !def.automatic && p.prev_buttons & IN_ATTACK != 0
+            !def.automatic && p.weapon().is_some_and(|w| w.shots_fired > 0)
         };
 
         if attack && now >= self.players[i].next_attack && !semi_block {
@@ -857,6 +863,9 @@ impl Game {
             let src = p.pm.eye();
             let w = p.weapon_mut().unwrap();
             let spread = compute_spread(w, st, now);
+            if !w.def().automatic {
+                w.shots_fired += 1;
+            }
             w.clip -= 1;
             w.last_fire = now;
             (spread, w.id, angles, src)
