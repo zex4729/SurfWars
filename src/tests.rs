@@ -160,10 +160,10 @@ fn bot_routes() {
             );
             // The bot must get through the route (the last point may be a
             // hold spot it is still camping at).
-            assert!(max_wp + 1 >= r.points.len(), "{} / {}: stopped at waypoint {}", mapname, r.name, max_wp);
-            if std::env::var("BOTLOG").map_or(false, |v| r.name.contains(&v)) {
+            if std::env::var("BOTLOG").is_ok_and(|v| r.name.contains(&v)) {
                 println!("{log}");
             }
+            assert!(max_wp + 1 >= r.points.len(), "{} / {}: stopped at waypoint {}", mapname, r.name, max_wp);
         }
     }
 }
@@ -429,6 +429,174 @@ mod weapon_tests {
         let w = g.players[0].weapon().unwrap();
         assert_eq!(w.clip, 30);
         assert!(w.reserve < 90);
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+    enum Stance {
+        Standing,
+        Running,
+        Airborne,
+    }
+
+    /// Fires `shots` at a chest high dummy `dist` units away and returns the
+    /// hit rate in percent. `spray` holds the trigger; otherwise every shot is
+    /// a first shot (the gun settles in between). Shotgun shots count as hits
+    /// if any pellet lands.
+    fn accuracy(
+        id: WeaponId,
+        att: Attachments,
+        dist: f32,
+        stance: Stance,
+        aim: bool,
+        shots: usize,
+        spray: bool,
+    ) -> f32 {
+        let mut g = duel();
+        g.players[1].health = 1e9;
+        g.players[0].inventory.clear();
+        let base = vec3(-4200.0, -300.0, if stance == Stance::Airborne { 2436.0 + 160.0 } else { 2436.0 });
+        let target = vec3(-4200.0 + dist, -300.0, 2436.0);
+        let pin = |g: &mut Game| {
+            let p = &mut g.players[0].pm;
+            p.origin = base;
+            p.velocity = match stance {
+                Stance::Running => vec3(0.0, 250.0, 0.0),
+                _ => vec3(0.0, 0.0, 0.0),
+            };
+            if stance == Stance::Airborne {
+                p.onground = false;
+            }
+            let t = &mut g.players[1].pm;
+            t.origin = target;
+            t.velocity = vec3(0.0, 0.0, 0.0);
+            g.players[1].health = 1e9;
+        };
+        g.give(0, id);
+        g.players[0].primary.as_mut().map(|w| w.att = att);
+        g.players[0].secondary.as_mut().filter(|w| w.id == id).map(|w| w.att = att);
+        let settle = |g: &mut Game, n: usize| {
+            for _ in 0..n {
+                pin(g);
+                let c = cmd(g, 0);
+                g.step(Some(c));
+                g.events.clear();
+            }
+        };
+        settle(&mut g, 120);
+        let mut hits = 0;
+        let mut fired = 0;
+        let mut guard = 0;
+        while fired < shots && guard < 200_000 {
+            guard += 1;
+            if aim && g.players[0].zoom == 0 && g.players[0].resume_zoom.is_none() && g.time >= g.players[0].next_attack
+            {
+                pin(&mut g);
+                let c = cmd(&g, IN_ATTACK2);
+                g.step(Some(c));
+                g.events.clear();
+                settle(&mut g, 2);
+            }
+            let w = g.players[0].weapon().unwrap();
+            if w.clip == 0 {
+                pin(&mut g);
+                let c = cmd(&g, IN_RELOAD);
+                g.step(Some(c));
+                settle(&mut g, 400);
+                continue;
+            }
+            pin(&mut g);
+            let c = cmd(&g, IN_ATTACK);
+            g.step(Some(c));
+            let shot = g.events.iter().any(|e| matches!(e, Event::Shot { player: 0, .. }));
+            let hit = g.events.iter().any(|e| matches!(e, Event::Hit { victim: 1, .. }));
+            g.events.clear();
+            if shot {
+                fired += 1;
+                if hit {
+                    hits += 1;
+                }
+                if !spray {
+                    // release, let the spread and recoil recover
+                    settle(&mut g, if matches!(id, WeaponId::Awp | WeaponId::Scout) { 160 } else { 90 });
+                }
+            } else if !spray {
+                settle(&mut g, 1);
+            }
+        }
+        hits as f32 * 100.0 / fired.max(1) as f32
+    }
+
+    /// Hit rates for every weapon by distance and stance, bursts, and what
+    /// sights do. Prints a table (run with --nocapture) and checks that the
+    /// numbers make sense.
+    #[test]
+    fn weapon_accuracy() {
+        let guns = [
+            (WeaponId::Usp, false),
+            (WeaponId::Mp5, false),
+            (WeaponId::M3, false),
+            (WeaponId::Ak47, false),
+            (WeaponId::Scout, true),
+            (WeaponId::Awp, true),
+            (WeaponId::Laser, false),
+        ];
+        let dists = [300.0, 1000.0, 2000.0];
+        let stances = [Stance::Standing, Stance::Running, Stance::Airborne];
+        let n = 30;
+        println!("first shot hit rate %, chest high target (scoped weapons aimed)");
+        println!("{:<10} {:>21} {:>21} {:>21}", "", "standing", "running", "airborne");
+        println!(
+            "{:<10} {:>7}{:>7}{:>7} {:>7}{:>7}{:>7} {:>7}{:>7}{:>7}",
+            "weapon", 300, 1000, 2000, 300, 1000, 2000, 300, 1000, 2000
+        );
+        let mut table = std::collections::HashMap::new();
+        for (id, aim) in guns {
+            let mut line = format!("{:<10}", id.def().name.split(' ').next().unwrap());
+            for st in stances {
+                line += " ";
+                for d in dists {
+                    let r = accuracy(id, Attachments::default(), d, st, aim, n, false);
+                    table.insert((id, st, d as i32), r);
+                    line += &format!("{r:>7.0}");
+                }
+            }
+            println!("{line}");
+        }
+        println!("\nspray, 10 round bursts standing at 1000 units:");
+        for id in [WeaponId::Mp5, WeaponId::Ak47] {
+            let iron = accuracy(id, Attachments::default(), 1000.0, Stance::Standing, false, 30, true);
+            let grip = Attachments { grip: Grip::Vertical, stock: Stock::Heavy, ..Default::default() };
+            let tuned = accuracy(id, grip, 1000.0, Stance::Standing, false, 30, true);
+            println!("  {:<10} stock {iron:>5.0}%   vertical grip + heavy stock {tuned:>5.0}%", id.def().name);
+            assert!(tuned >= iron - 5.0, "recoil attachments made {id:?} sprays worse");
+        }
+        println!("\nsights on the MP5, first shots standing at 1500 units:");
+        let mut sight_rates = Vec::new();
+        for sight in [Sight::Iron, Sight::RedDot, Sight::Holo, Sight::Acog] {
+            let att = Attachments { sight, ..Default::default() };
+            let aim = sight != Sight::Iron;
+            let r = accuracy(WeaponId::Mp5, att, 1500.0, Stance::Standing, aim, 40, false);
+            println!("  {:<14} {r:>5.0}%", sight.name());
+            sight_rates.push(r);
+        }
+        assert!(sight_rates[3] >= sight_rates[0] - 5.0, "ACOG worse than iron sights: {sight_rates:?}");
+
+        // Sanity: close range standing first shots hit, the air is worse than
+        // the ground, and scoped snipers hit at range.
+        for id in [WeaponId::Usp, WeaponId::Mp5, WeaponId::Ak47, WeaponId::Scout, WeaponId::Awp, WeaponId::Laser] {
+            let r = table[&(id, Stance::Standing, 300)];
+            assert!(r >= 90.0, "{id:?} standing at 300 only hits {r}%");
+        }
+        for id in [WeaponId::Scout, WeaponId::Awp, WeaponId::Laser] {
+            let r = table[&(id, Stance::Standing, 2000)];
+            assert!(r >= 80.0, "{id:?} standing at 2000 only hits {r}%");
+        }
+        for id in [WeaponId::Usp, WeaponId::Ak47, WeaponId::Awp] {
+            let ground = table[&(id, Stance::Standing, 1000)];
+            let air = table[&(id, Stance::Airborne, 1000)];
+            assert!(air <= ground, "{id:?} is more accurate in the air ({air}%) than standing ({ground}%)");
+        }
+        assert!(table[&(WeaponId::M3, Stance::Standing, 300)] >= 90.0);
     }
 
     #[test]
@@ -749,7 +917,8 @@ fn sky_ramps_reach_platforms() {
     for name in map::BUILTIN_MAPS {
         let g0 = solo_game(name);
         let skies = g0.map.sky.clone();
-        assert!(skies.len() == 2, "{name} has {} sky ramps", skies.len());
+        let converted = matches!(name, "surf_ski" | "surf_utopia");
+        assert!(skies.len() == 2 || converted, "{name} has {} sky ramps", skies.len());
         for (k, sky) in skies.iter().enumerate() {
             let mut g = solo_game(name);
             g.players[0].pm = PmState::new(sky.pad + vec3(0.0, 0.0, 38.0));
@@ -811,7 +980,7 @@ fn spawn_launchers_land_on_ramps() {
             .map(|b| b.pad())
             .filter(|p| !sky_pads.iter().any(|q| q.distance(*p) < 1.0))
             .collect();
-        assert!(!pads.is_empty(), "{name} has no spawn launch pads");
+        assert!(!pads.is_empty() || matches!(name, "surf_ski" | "surf_utopia"), "{name} has no spawn launch pads");
         for pad in pads {
             let mut g = solo_game(name);
             g.players[0].pm = PmState::new(pad + vec3(0.0, 0.0, 38.0));
@@ -886,7 +1055,6 @@ fn editor_drags_and_boosters() {
 /// come back to the inventory when the gun is lost.
 #[test]
 fn attachment_inventory() {
-    use crate::game::*;
     use crate::map::PickupKind;
     use crate::weapons::*;
     let mut g = solo_game("surf_wars");
@@ -929,4 +1097,124 @@ fn attachment_inventory() {
     g.give(0, WeaponId::Mp5);
     assert_eq!(g.players[0].primary.unwrap().att.sight, Sight::RedDot);
     assert_eq!(g.players[0].inventory, vec![AttItem::Sight(Sight::Acog)]);
+}
+
+/// Every attachment keeps more damage at long range; the shotgun's pellets
+/// reach further.
+#[test]
+fn attachments_extend_range() {
+    use crate::weapons::*;
+    for id in [WeaponId::Usp, WeaponId::Mp5, WeaponId::M3, WeaponId::Ak47] {
+        let base = Weapon::new(id);
+        for item in AttItem::ALL {
+            let mut att = Attachments::default();
+            att.set(item.category(), Some(item));
+            let w = Weapon::with(id, att);
+            // compare falloff only (the suppressor also has a flat damage cut)
+            let gain = w.damage_at(2000.0) / w.damage_at(0.0);
+            let base_gain = base.damage_at(2000.0) / base.damage_at(0.0);
+            assert!(gain > base_gain, "{item:?} on {id:?}: {gain} <= {base_gain}");
+        }
+    }
+    let far = Weapon::with(WeaponId::Mp5, Attachments { muzzle: Muzzle::LongBarrel, ..Default::default() });
+    let ratio = far.damage_at(2000.0) / Weapon::new(WeaponId::Mp5).damage_at(2000.0);
+    println!("MP5 long barrel keeps x{ratio:.2} damage at 2000 units");
+    assert!(ratio > 1.3);
+}
+
+/// Teleport triggers: the ski spawn booth goes to the perch, the bottom goes
+/// back to spawn, and falling off a utopia stage puts you back on it.
+#[test]
+fn teleports() {
+    use crate::game::*;
+    let step_until_tp = |g: &mut Game| {
+        for _ in 0..400 {
+            g.step(Some(UserCmd { msec: 10, ..Default::default() }));
+            if g.events.drain(..).any(|e| matches!(e, Event::Teleport { player: 0 })) {
+                return true;
+            }
+        }
+        false
+    };
+    let mut g = solo_game("surf_ski");
+    g.players[0].pm = PmState::new(vec3(-6172.0, -800.0, 3037.0));
+    assert!(step_until_tp(&mut g), "booth did not teleport");
+    let p = g.players[0].pm.origin;
+    assert!(p.z > 3400.0 && p.x.abs() < 300.0, "booth sent us to {p}");
+    g.players[0].pm = PmState::new(vec3(0.0, 5000.0, 900.0));
+    assert!(step_until_tp(&mut g), "falling to the bottom did not teleport");
+    assert!(g.players[0].pm.origin.x < -5000.0, "not back at the T spawn: {}", g.players[0].pm.origin);
+
+    let mut g = solo_game("surf_utopia");
+    // fall off the second stage
+    g.players[0].pm = PmState::new(vec3(-5000.0, 2600.0, 3000.0));
+    assert!(step_until_tp(&mut g), "no checkpoint teleport");
+    let p = g.players[0].pm.origin;
+    assert!(p.x > -6500.0 && p.x < -5800.0 && p.z > 4500.0, "checkpoint at {p}");
+    // it drops us onto the stage: we should be surfing shortly after
+    let mut surfed = false;
+    for _ in 0..150 {
+        g.step(Some(UserCmd { msec: 10, ..Default::default() }));
+        surfed |= g.players[0].pm.is_surfing();
+    }
+    assert!(surfed, "checkpoint did not drop us onto the stage");
+}
+
+/// Face dragging reshapes a brush, the clip tool cuts it, and teleports and
+/// bot routes survive a save and load.
+#[test]
+fn editor_faces_clip_teleports() {
+    use crate::editor::Editor;
+    use macroquad::math::vec2;
+    let mut ed = Editor::new(None);
+    ed.look_from(vec3(0.0, -1500.0, 2600.0), vec3(35.0, 90.0, 0.0));
+    ed.add_shape("box");
+    let i = ed.selected_brush().unwrap();
+    let (a0, b0) = (ed.game.map.world.brushes[i].mins, ed.game.map.world.brushes[i].maxs);
+    // raise the top face by 64
+    ed.select_face(i, vec3(0.0, 0.0, 1.0));
+    ed.drag_axis(2, 64.0);
+    let b = &ed.game.map.world.brushes[i];
+    assert!((b.maxs.z - b0.z - 64.0).abs() < 0.5 && (b.mins.z - a0.z).abs() < 0.5, "top face drag: {:?}", b.maxs);
+    // lift the +X side face: the top becomes a slope
+    ed.select_face(i, vec3(1.0, 0.0, 0.0));
+    ed.drag_axis(2, 128.0);
+    let b = &ed.game.map.world.brushes[i];
+    let sloped = b.faces.iter().any(|f| f.normal.z > 0.05 && f.normal.z < 0.99);
+    assert!(sloped, "no sloped face after dragging a side face up");
+    assert!(ed.face_normal().is_some());
+
+    // cut it in half along x = centre
+    let n0 = ed.game.map.world.brushes.len();
+    let (lo, hi) = (ed.game.map.world.brushes[i].mins, ed.game.map.world.brushes[i].maxs);
+    let cx = ((lo.x + hi.x) * 0.5 / 32.0).round() * 32.0;
+    ed.set_clip(vec2(cx, lo.y - 100.0), vec2(cx, hi.y + 100.0), 0);
+    ed.apply_clip();
+    assert_eq!(ed.game.map.world.brushes.len(), n0 + 1);
+    let w1 = ed.game.map.world.brushes[i].maxs.x - ed.game.map.world.brushes[i].mins.x;
+    let w2 = ed.game.map.world.brushes[n0].maxs.x - ed.game.map.world.brushes[n0].mins.x;
+    assert!((w1 + w2 - (hi.x - lo.x)).abs() < 1.0, "halves {w1} + {w2} != {}", hi.x - lo.x);
+    // keep one side only
+    let n1 = ed.game.map.world.brushes.len();
+    let (lo, hi) = (ed.game.map.world.brushes[n0].mins, ed.game.map.world.brushes[n0].maxs);
+    let cy = ((lo.y + hi.y) * 0.5 / 32.0).round() * 32.0;
+    // select that brush via a face pick and cut across y keeping the front
+    ed.select_face(n0, vec3(0.0, 0.0, 1.0));
+    ed.set_clip(vec2(lo.x - 50.0, cy), vec2(hi.x + 50.0, cy), 1);
+    ed.apply_clip();
+    assert_eq!(ed.game.map.world.brushes.len(), n1);
+    let b = &ed.game.map.world.brushes[n0];
+    assert!(b.maxs.y - b.mins.y < hi.y - lo.y - 1.0);
+
+    // teleports and routes round trip through the file format
+    ed.add_tele();
+    let mut m = crate::editor::clone_map(&ed.game.map);
+    m.routes = map::load("surf_wars").routes;
+    let text = crate::mapfile::to_text(&m);
+    let back = crate::mapfile::from_text(&text).unwrap();
+    assert_eq!(back.teleports.len(), m.teleports.len());
+    assert!(matches!(back.teleports.last().unwrap().dest, crate::map::TeleDest::Point { .. }));
+    assert_eq!(back.routes.len(), m.routes.len());
+    assert_eq!(back.routes[0].points.len(), m.routes[0].points.len());
+    assert_eq!(back.routes[0].name, m.routes[0].name);
 }

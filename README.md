@@ -14,7 +14,10 @@ classic CS arsenal.
 | ![Map editor, four views](docs/editor.png) | ![Attachment inventory](docs/inventory.png) |
 | ![Sky ramp](docs/sky_ramp.png) | ![Sky platform with rare attachments](docs/sky_platform.png) |
 | ![Booster chevrons](docs/boosters.png) | ![Launch pads at the spawn](docs/launch_pads.png) |
-| ![Red dot, aimed down the sight](docs/ads.png) | |
+| ![Red dot, aimed down the sight](docs/ads.png) | ![Damage numbers](docs/damage.png) |
+| ![surf_ski](docs/ski.png) | ![surf_utopia](docs/utopia.png) |
+| ![Editor face tool](docs/editor_face.png) | ![Editor clip tool](docs/editor_clip.png) |
+| ![Editor bot paths](docs/editor_paths.png) | ![Forest scenery](docs/scenery_forest.png) |
 
 ## Features
 
@@ -62,7 +65,9 @@ classic CS arsenal.
   sight's reflex reticle; the 4x ACOG is a scope), muzzles (suppressor,
   compensator, long barrel), stocks (light, heavy) and grips (vertical,
   angled, stubby). Each changes spread, recoil, damage, speed, reload or
-  draw time. They are not for sale: pick them up on the map (common ones on
+  draw time, and every one of them also cuts damage falloff, so guns hit
+  harder at long range (a long barrel keeps about 40% more MP5 damage at 2000
+  units; the inventory shows the gain for your setup). They are not for sale: pick them up on the map (common ones on
   the hard to reach perches next to the good guns, rare ones on the sky
   platforms). Picked up parts go straight onto the gun in your hands if that
   spot is free, otherwise into your **inventory** (I): tabs for sights,
@@ -71,6 +76,8 @@ classic CS arsenal.
   new gun of the same type gets your last setup refitted. Bots get random
   attachments and adjust their firing range, burst length and scope use to
   them.
+- **Damage numbers**: every hit you land shows the damage over the target
+  (hits in quick succession add up; yellow for headshots, red with KILL).
 - **Map pickups**: weapon spawners, attachments and health packs (+50 HP)
   that respawn after a while. Walk into a weapon to pick it up, or press E to
   swap it for the gun you are holding.
@@ -82,7 +89,7 @@ classic CS arsenal.
   ramps with perpendicular air strafes, bunny hop pillars with landing
   prediction, and fight with reaction times, tracking, recoil control and
   burst fire. Four difficulty levels.
-- **Three maps** made of ramps with bunny hop sections. All bunny hop
+- **Five maps** made of ramps with bunny hop sections. All bunny hop
   pillars are level, so you can hop back the way you came.
   - `surf_wars`: two long V shaped surf lanes between the spawns, a high
     middle island reached over pillars (with tiny-pillar perches holding an
@@ -96,13 +103,35 @@ classic CS arsenal.
     back down the middle past the other team. A long pillar line leads to a
     sky fort with an AWP, and the AKs sit on perches inside the hairpins that
     you only reach by jumping off the ramp at the right moment.
-- **Map editor**: fly around, add boxes, slopes, surf ramps, 90 and 180
+  - `surf_ski`, after the CS 1.6 classic *surf_ski_2*: steep ski chutes from
+    each spawn end in boosted kickers that throw you over a big ski hill in
+    the middle, long flat side lanes run the length of the map, a teleport
+    booth in each spawn beams you to an AWP perch floating over the hill,
+    and teleports at the bottom send you back to your spawn. Snowy
+    mountains all around.
+  - `surf_utopia`, after the classic *surf_utopia*: each team starts high in
+    a dusk sky and surfs three long, wide stages, dropping from the end of
+    one onto the next, down to a floating arena in the middle. Falling off a
+    stage teleports you back to the start of that stage, like the
+    checkpoint teleports on the real map.
+
+  The two classics are recreated by hand from their layout and feel (the
+  game has no BSP loader and ships no map files), scaled to this game's
+  movement and combat, with bot routes for every lane.
+- **Teleports**: `trigger_teleport` volumes that send you to a spot (and stop
+  you, like Half-Life) or back to your team spawn.
+- **Huge sky**: every map sits in a much larger box than before, so there is
+  room to fly around, and the skybox shows scenery on the horizon that
+  follows the camera like a GoldSrc 3D skybox: a city skyline with lit
+  windows, snowy mountains, forest hills or desert mesas.- **Map editor**: fly around, add boxes, slopes, surf ramps, 90 and 180
   degree turning ramps and pillars, move them with X / Y / Z arrows, resize
-  them on the grid in Hammer style Top / Front / Side views (Tab), rotate /
+  them on the grid in Hammer style Top / Front / Side views (Tab), drag
+  single faces to reshape slopes, cut brushes with a clip tool, rotate /
   recolour them, place spawns, pickups (including the laser, the rocket
-  launcher and attachments), boosters and launch pads, set the sky and fall
-  height, save to `maps/<name>.map` and test play with bots. Saved maps
-  appear in the main menu's map list.
+  launcher and attachments), boosters, launch pads and teleports, pick
+  things from drop down menus, show the bots' paths, set the sky and the
+  skybox scenery, save to `maps/<name>.map` and test play with bots. Saved
+  maps appear in the main menu's map list.
 - **Stuck bots die**: a bot that makes no progress for 7 seconds (outside
   camping spots) kills itself and respawns.
   Falling into the water teleports you back to your spawn, like on surf
@@ -170,27 +199,35 @@ saved as `<name>_edit`).
 | Input | Action |
 |---|---|
 | hold right mouse (3D view) | look around; WASD fly, Space / Ctrl up / down, Shift faster |
-| left click (3D view) | select a brush, spawn, pickup, booster or launch pad |
+| 1 / 2 / 3 or the tool buttons | Select, Face or Clip tool |
+| left click (3D view) | select a brush, spawn, pickup, booster, launch pad or teleport (Face tool: a face) |
 | drag the red / green / blue arrows | move the selection along X / Y / Z, snapped to the grid |
 | Tab or *4 views* | four pane layout: 3D plus Top (X/Y), Front (Y/Z) and Side (X/Z) grid views |
 | left drag in a 2D view | select and move (snapped to the grid) |
 | drag a white handle in a 2D view | resize the selection; its edges snap to the grid |
 | wheel / right or middle drag in a 2D view | zoom / pan; C centres the views on the selection |
-| panel buttons | add shapes, spawns, pickups, boosters and launch pads (placed where you look), move / size / rotate / colour / texture / duplicate / delete the selection, grid size, sky, 1 or 4 views, fall height, save, load, new, test play |
+| Face tool | click a face (3D or 2D view), then drag its arrows or drag it in a 2D view: only that face moves, so you can raise the top edge of a slope or push a ramp face out |
+| Clip tool | select a brush, drag a line across it in a 2D view; green / red previews the halves; Enter (or *Cut*) cuts, *Keep* chooses both halves or one |
+| drop down menus | pickup kind (to add, or for the selected pickup), colour, texture, sky, skybox scenery, booster speed, clip keep mode, and *Load* for any map |
+| *Bot paths* | draws every bot route (orange T, blue CT) with waypoints coloured by what the bot does there: walk, drop, hop, surf, hold |
+| panel buttons | add shapes, spawns, pickups, boosters, launch pads and teleports (placed where you look), move / size / rotate / duplicate / delete the selection, grid size, 1 or 4 views, fall height, save, new, test play |
 | arrows, Page Up / Down | move the selection (Shift: 4x) |
 | R / F | rotate 15 degrees (spawns: turn their facing) |
 | Delete | delete the selection |
 | Ctrl + D / Ctrl + S | duplicate / save |
 
-Boosters: *Colour* cycles the push speed, *Tex* toggles one / two way,
-Rotate turns the push direction. Launch pads show their flight path: Size X
+Boosters: pick the speed from the drop down, toggle one / two way, Rotate
+turns the push direction. Teleports send you to the team spawn until you
+press *Dest here*, which makes them send you to where the camera looks
+(Rotate turns the arrival direction). Launch pads show their flight path: Size X
 changes the distance, Size Z the target height and Size Y the flight time.
 
 Maps are plain text (see `src/mapfile.rs`): every brush is the list of its
-corner points, plus spawns, pickups, boosters, launch pads, sky and fall
-height. Bots on editor maps
-have no hand made routes, so they roam: they head for the enemy spawn or a
-pickup, surf any ramp they land on and bunny hop across flat ground.
+corner points, plus spawns, pickups, boosters, launch pads, teleports, bot
+routes, sky, scenery and fall height. Bot routes are saved too, so editing a
+built-in map keeps its routes. Maps without routes make the bots roam: they
+head for the enemy spawn or a pickup, surf any ramp they land on and bunny
+hop across flat ground.
 
 ## Options
 
@@ -215,9 +252,32 @@ pickup, surf any ramp they land on and bunny hop across flat ground.
 | `src/game.rs` | game state, shooting, rockets, pickups, damage, rounds, triggers |
 | `src/bot.rs` | bot navigation, surfing and bunny hop control, combat |
 | `src/render.rs` | world, player models, boards, trails, effects, view model |
+| `src/backdrop.rs` | skybox scenery: city, mountains, forest, mesas |
 | `src/hud.rs` | HUD, radar, scoreboard, buy menu, sight reticles |
 | `src/audio.rs` | sound synthesis and playback |
 | `src/main.rs` | window, input, camera, menus, inventory screen, settings boxes |
+
+### Weapon accuracy
+
+`cargo test --release weapon_accuracy -- --nocapture` fires every gun at a
+chest high dummy and prints hit rates. First shots (the gun settles between
+shots), snipers scoped:
+
+| weapon | standing 300 / 1000 / 2000 | running 300 / 1000 / 2000 | airborne 300 / 1000 / 2000 |
+|---|---|---|---|
+| USP | 100 / 100 / 73 | 100 / 77 / 47 | 47 / 10 / 3 |
+| MP5 | 100 / 80 / 50 | 100 / 77 / 43 | 60 / 30 / 10 |
+| M3 (any pellet) | 100 / 93 / 30 | 100 / 90 / 40 | 100 / 87 / 30 |
+| AK-47 | 100 / 100 / 73 | 73 / 30 / 10 | 30 / 7 / 0 |
+| Scout | 100 / 100 / 83 | 67 / 20 / 3 | 23 / 3 / 0 |
+| AWP | 97 / 97 / 97 | 20 / 3 / 0 | 3 / 0 / 0 |
+| Laser | 100 / 100 / 100 | 100 / 100 / 100 | 100 / 93 / 63 |
+
+Ten round bursts at 1000 units hit 20% (MP5) and 7% (AK) stock, 40% and
+23% with a vertical grip and a heavy stock. MP5 first shots at 1500 units:
+iron sights 52%, red dot 62%, holographic 68%, ACOG 82%. This is CS 1.6
+behaviour: stand still to shoot, especially with snipers; surfers are
+treated as running when *Ramp accuracy* is on.
 
 ### Tests
 
@@ -228,9 +288,10 @@ cargo test --release -- --nocapture
 The tests check the movement (standing, jumping, surfing a ramp, ramp seams,
 the stock bunny hop cap, ramp climb), weapon behaviour (auto fire and
 reloads, semi-auto pistols, scope resume, shotgun shell reloads, headshots,
-rockets and rocket jumps, attachments, the buy list), the attachment
-inventory, health pickups, map file round trips, the editor tools and its
-drag / resize snapping, ride every launch pad and every sky ramp with a
+rockets and rocket jumps, attachments and their range bonus, the buy list,
+weapon accuracy), the attachment inventory, health pickups, teleports, map
+file round trips, the editor tools (drag / resize snapping, face dragging,
+clipping), ride every launch pad and every sky ramp with a
 scripted surfer (failing if it doesn't reach the platform), run a bot along
 every route of every map (failing if it does not get through), and simulate
 full bot matches to make sure fights happen and rounds end.
@@ -243,6 +304,6 @@ cargo run --release -- --no-audio --shot out.png --cam spectate --after 11
 ```
 
 `--cam` accepts `spectate`, `third`, `eye`, `overview`, `possess` and
-`possess3`; `--ui buy|scores|pause|scope|attach|ads|holo|laser|rocket|movement|editor|editor4`,
+`possess3`; `--ui buy|scores|pause|scope|attach|ads|holo|damage|laser|rocket|movement|editor|editor4|editor_face|editor_clip|editor_drop|editor_paths`,
 `--map`, `--team t|ct`, `--follow N`, `--look pitch,yaw` and `--at x,y,z`
 (a free camera, with `--look`) are also available.

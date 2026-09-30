@@ -5,11 +5,15 @@
 //! sky 0.2 0.38 0.72 0.78 0.86 0.95
 //! fog 0.72 0.8 0.9 3000 14000
 //! kill_z 450
+//! backdrop city
 //! brush grid 70 170 235 | x y z | x y z | ...
 //! spawn t x y z yaw
 //! pickup health x y z
 //! boost minx miny minz maxx maxy maxz dirx diry dirz speed two_way(0/1)
 //! launch padx pady padz targetx targety targetz seconds
+//! teleport minx miny minz maxx maxy maxz spawn
+//! teleport minx miny minz maxx maxy maxz x y z yaw
+//! route t surf name_without_spaces | x y z mode | x y z mode ...
 //! ```
 //!
 //! Every brush is stored as the corner points of its convex hull, so any
@@ -20,7 +24,10 @@ use std::path::PathBuf;
 use macroquad::math::{vec3, Vec3};
 
 use crate::collision::{Brush, CollisionWorld};
-use crate::map::{Aabb, Booster, Map, Mat, PickupDef, PickupKind, Push, Spawn, Tex};
+use crate::map::{
+    Aabb, Backdrop, Booster, Map, Mat, PickupDef, PickupKind, Push, Route, RouteKind, Spawn, Team, TeleDest, Teleport,
+    Tex, Waypoint, WpMode,
+};
 
 pub fn dir() -> PathBuf {
     PathBuf::from("maps")
@@ -81,6 +88,7 @@ pub fn to_text(m: &Map) -> String {
     );
     s += &format!("fog {} {} {} {} {}\n", m.fog_color[0], m.fog_color[1], m.fog_color[2], m.fog_start, m.fog_end);
     s += &format!("kill_z {}\n", m.kill_z);
+    s += &format!("backdrop {}\n", m.backdrop.key());
     for b in &m.world.brushes {
         s += &format!("brush {} {} {} {}", tex_key(b.mat.tex), b.mat.color[0], b.mat.color[1], b.mat.color[2]);
         for p in &b.points {
@@ -111,6 +119,34 @@ pub fn to_text(m: &Map) -> String {
             }
         }
     }
+    for t in &m.teleports {
+        let (a, c) = (t.zone.mins, t.zone.maxs);
+        s += &format!("teleport {} {} {} {} {} {}", a.x, a.y, a.z, c.x, c.y, c.z);
+        match t.dest {
+            TeleDest::TeamSpawn => s += " spawn\n",
+            TeleDest::Point { pos, yaw } => s += &format!(" {} {} {} {}\n", pos.x, pos.y, pos.z, yaw),
+        }
+    }
+    for r in &m.routes {
+        let kind = match r.kind {
+            RouteKind::Surf => "surf",
+            RouteKind::Bhop => "bhop",
+            RouteKind::Sniper => "sniper",
+        };
+        let team = if r.team == Team::T { "t" } else { "ct" };
+        s += &format!("route {team} {kind} {}", r.name.replace(' ', "_"));
+        for w in &r.points {
+            let mode = match w.mode {
+                WpMode::Walk => "walk",
+                WpMode::Drop => "drop",
+                WpMode::Hop => "hop",
+                WpMode::Surf => "surf",
+                WpMode::Hold => "hold",
+            };
+            s += &format!(" | {} {} {} {mode}", w.pos.x, w.pos.y, w.pos.z);
+        }
+        s += "\n";
+    }
     s
 }
 
@@ -125,10 +161,13 @@ pub fn from_text(text: &str) -> Result<Map, String> {
     let mut fog_color = [0.72, 0.80, 0.90];
     let mut fog = (3000.0, 14000.0);
     let mut kill_z = 450.0;
+    let mut backdrop = Backdrop::City;
     let mut brushes = Vec::new();
     let mut spawns: [Vec<Spawn>; 2] = [Vec::new(), Vec::new()];
     let mut pickups = Vec::new();
     let mut boosters = Vec::new();
+    let mut teleports = Vec::new();
+    let mut routes = Vec::new();
     for (ln, line) in text.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -152,6 +191,9 @@ pub fn from_text(text: &str) -> Result<Map, String> {
                     fog_color = [v[0], v[1], v[2]];
                     fog = (v[3], v[4]);
                 }
+            }
+            "backdrop" => {
+                backdrop = Backdrop::from_key(rest.trim()).ok_or_else(|| err(format!("unknown backdrop {rest}")))?
             }
             "kill_z" => kill_z = nums(&parts).map_err(err)?.first().copied().unwrap_or(kill_z),
             "brush" => {
@@ -214,6 +256,49 @@ pub fn from_text(text: &str) -> Result<Map, String> {
                 }
                 boosters.push(Booster::launcher(vec3(v[0], v[1], v[2]), vec3(v[3], v[4], v[5]), v[6].max(0.2)));
             }
+            "teleport" => {
+                if parts.len() == 7 && parts[6] == "spawn" {
+                    let v = nums(&parts[..6]).map_err(err)?;
+                    teleports.push(Teleport::to_spawn(Aabb::new(vec3(v[0], v[1], v[2]), vec3(v[3], v[4], v[5]))));
+                } else {
+                    let v = nums(&parts).map_err(err)?;
+                    if v.len() != 10 {
+                        return Err(err("teleport needs: min xyz, max xyz, then spawn or x y z yaw".into()));
+                    }
+                    let zone = Aabb::new(vec3(v[0], v[1], v[2]), vec3(v[3], v[4], v[5]));
+                    teleports.push(Teleport::to_point(zone, vec3(v[6], v[7], v[8]), v[9]));
+                }
+            }
+            "route" => {
+                let mut groups = rest.split('|');
+                let head: Vec<&str> = groups.next().unwrap_or("").split_whitespace().collect();
+                if head.len() != 3 {
+                    return Err(err("route needs: team kind name".into()));
+                }
+                let team = if head[0] == "ct" { Team::CT } else { Team::T };
+                let kind = match head[1] {
+                    "bhop" => RouteKind::Bhop,
+                    "sniper" => RouteKind::Sniper,
+                    _ => RouteKind::Surf,
+                };
+                let mut points = Vec::new();
+                for g in groups {
+                    let p: Vec<&str> = g.split_whitespace().collect();
+                    if p.len() != 4 {
+                        return Err(err("waypoints need x y z mode".into()));
+                    }
+                    let v = nums(&p[..3]).map_err(err)?;
+                    let mode = match p[3] {
+                        "walk" => WpMode::Walk,
+                        "drop" => WpMode::Drop,
+                        "hop" => WpMode::Hop,
+                        "hold" => WpMode::Hold,
+                        _ => WpMode::Surf,
+                    };
+                    points.push(Waypoint { pos: vec3(v[0], v[1], v[2]), mode });
+                }
+                routes.push(Route { team, kind, name: head[2].replace('_', " "), points });
+            }
             _ => return Err(err(format!("unknown key {key}"))),
         }
     }
@@ -226,13 +311,15 @@ pub fn from_text(text: &str) -> Result<Map, String> {
         buyzones,
         pickups,
         boosters,
+        teleports,
         sky: Vec::new(),
-        routes: Vec::new(),
+        routes,
         sky_top,
         sky_horizon,
         fog_color,
         fog_start: fog.0,
         fog_end: fog.1,
+        backdrop,
     })
 }
 

@@ -103,6 +103,8 @@ pub enum Event {
         attacker: usize,
         pos: Vec3,
         headshot: bool,
+        /// Health taken (not more than the victim had).
+        damage: f32,
     },
     Kill {
         victim: usize,
@@ -900,9 +902,25 @@ impl Game {
 
         // Triggers.
         self.apply_boosters(i);
+        let tele = {
+            let p = &self.players[i];
+            let (o, mins, maxs) = (p.pm.origin, p.pm.mins(), p.pm.maxs());
+            self.map.teleports.iter().find(|t| t.zone.touches(o, mins, maxs)).map(|t| t.dest)
+        };
+        if let Some(crate::map::TeleDest::Point { pos, yaw }) = tele {
+            let p = &mut self.players[i];
+            p.pm = PmState::new(pos);
+            p.prev_origin = pos;
+            p.angles.y = yaw;
+            p.board = 0.0;
+            self.events.push(Event::Teleport { player: i });
+            if let Some(b) = p.bot.as_mut() {
+                b.on_teleport();
+            }
+        }
         let teleport = {
             let p = &self.players[i];
-            self.map.in_kill_zone(p.pm.origin, p.pm.mins())
+            self.map.in_kill_zone(p.pm.origin, p.pm.mins()) || tele == Some(crate::map::TeleDest::TeamSpawn)
         };
         if teleport {
             let team = self.players[i].team;
@@ -1203,7 +1221,6 @@ impl Game {
 
     fn fire_bullet(&mut self, i: usize, src: Vec3, dir: Vec3, id: WeaponId, mods: Mods) {
         let def = id.def();
-        let range_mod = (def.range_modifier + mods.range_bonus).min(1.0);
         let team = self.players[i].team;
         let tracer = |g: &mut Game, a: Vec3, b: Vec3| {
             if id == WeaponId::Laser {
@@ -1212,7 +1229,7 @@ impl Game {
                 g.events.push(Event::Tracer { start: a, end: b });
             }
         };
-        let range = if id == WeaponId::M3 { 3000.0 } else { 8192.0 };
+        let range = if id == WeaponId::M3 { 3000.0 * (1.0 + mods.range_bonus * 8.0) } else { 8192.0 };
         let wtr = self.map.world.trace_ray(src, src + dir * range);
         let wall_dist = wtr.fraction * range;
         let mut hit: Option<(usize, f32, HitGroup)> = None;
@@ -1229,12 +1246,7 @@ impl Game {
         let muzzle = src + dir * 20.0 + vec3(0.0, 0.0, -6.0);
         match hit {
             Some((j, t, g)) => {
-                let dmg = mods.damage
-                    * if id == WeaponId::M3 {
-                        (1.0 - t / range) * def.damage
-                    } else {
-                        def.damage * range_mod.powf(t / 500.0)
-                    };
+                let dmg = mods.damage * def.damage * falloff(id, def.range_modifier, mods.range_bonus, t);
                 let pos = src + dir * t;
                 tracer(self, muzzle, pos);
                 let same_team = self.players[j].team == self.players[i].team;
@@ -1341,6 +1353,7 @@ impl Game {
         };
         let headshot = group == HitGroup::Head;
         let attacker_pos = attacker.map(|a| self.players[a].pm.origin);
+        let dealt = hp_dmg.min(self.players[victim].health).max(0.0);
         {
             let p = &mut self.players[victim];
             p.health -= hp_dmg;
@@ -1359,7 +1372,7 @@ impl Game {
             p.pm.punchangle.x -= (hp_dmg * 0.1).min(4.0);
         }
         if let Some(a) = attacker {
-            self.events.push(Event::Hit { victim, attacker: a, pos, headshot });
+            self.events.push(Event::Hit { victim, attacker: a, pos, headshot, damage: dealt });
             if let Some(b) = self.players[victim].bot.as_mut() {
                 b.on_hurt(a);
             }

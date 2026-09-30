@@ -1,6 +1,7 @@
 //! SurfWars: a Counter-Strike 1.6 style surf combat game.
 
 mod audio;
+mod backdrop;
 mod bot;
 mod collision;
 mod editor;
@@ -237,6 +238,17 @@ impl Ui {
     }
 }
 
+/// Damage you dealt, floating over the victim.
+#[derive(Clone, Debug)]
+struct DamagePopup {
+    victim: usize,
+    pos: Vec3,
+    amount: f32,
+    headshot: bool,
+    kill: bool,
+    t0: f64,
+}
+
 /// A number being typed into one of the settings boxes.
 #[derive(Clone, Debug, Default)]
 struct NumEdit {
@@ -427,6 +439,8 @@ struct App {
     third_person: bool,
     buy_menu: bool,
     num_edit: NumEdit,
+    /// Damage numbers over the players you hit.
+    damage_popups: Vec<DamagePopup>,
     /// Attachment inventory screen.
     inventory: bool,
     inv_tab: usize,
@@ -739,6 +753,7 @@ impl App {
                     }
                 }
             }
+            self.collect_damage(&events);
             let listener = self.listener_pos();
             self.renderer.handle_events(&self.game, &events);
             self.audio.handle_events(&self.game, &events, listener, self.game.local);
@@ -925,11 +940,91 @@ impl App {
             fps: self.fps,
         });
 
+        if fp || self.args.at.is_none() {
+            self.draw_damage(&view);
+        }
         if self.inventory && !self.paused {
             self.draw_inventory();
         }
         if self.paused {
             self.draw_pause();
+        }
+    }
+
+    /// Turns the local player's hits into damage numbers. Hits on the same
+    /// victim in quick succession (shotgun pellets, bursts) add up.
+    fn collect_damage(&mut self, events: &[game::Event]) {
+        let Some(li) = self.game.local else { return };
+        let now = self.game.time;
+        for e in events {
+            match e {
+                game::Event::Hit { victim, attacker, pos, headshot, damage } if *attacker == li && *victim != li => {
+                    let merge = self
+                        .damage_popups
+                        .iter_mut()
+                        .rev()
+                        .find(|d| d.victim == *victim && now - d.t0 < 0.35 && !d.kill);
+                    match merge {
+                        Some(d) => {
+                            d.amount += damage;
+                            d.headshot |= *headshot;
+                            d.pos = *pos;
+                            d.t0 = now;
+                        }
+                        None => self.damage_popups.push(DamagePopup {
+                            victim: *victim,
+                            pos: *pos,
+                            amount: *damage,
+                            headshot: *headshot,
+                            kill: false,
+                            t0: now,
+                        }),
+                    }
+                }
+                game::Event::Kill { victim, attacker: Some(a), .. } if *a == li && *victim != li => {
+                    if let Some(d) = self.damage_popups.iter_mut().rev().find(|d| d.victim == *victim) {
+                        d.kill = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.damage_popups.retain(|d| now - d.t0 < 1.4);
+    }
+
+    /// Floating damage numbers, projected with the view camera.
+    fn draw_damage(&self, view: &View) {
+        let cam = render::camera_for(view);
+        let m = cam.matrix();
+        let sw = screen_width();
+        let sh = screen_height();
+        let s = sh / 720.0;
+        let now = self.game.time;
+        for d in &self.damage_popups {
+            let age = (now - d.t0) as f32;
+            let p = d.pos + vec3(0.0, 0.0, 12.0 + age * 45.0);
+            let clip = m * p.extend(1.0);
+            if clip.w <= 1.0 {
+                continue;
+            }
+            let ndc = clip.truncate() / clip.w;
+            if ndc.x.abs() > 1.2 || ndc.y.abs() > 1.2 {
+                continue;
+            }
+            let x = (ndc.x + 1.0) * 0.5 * sw;
+            let y = (1.0 - ndc.y) * 0.5 * sh;
+            let a = (1.0 - (age - 0.8).max(0.0) / 0.6).clamp(0.0, 1.0);
+            let (c, label) = if d.kill {
+                (Color::new(1.0, 0.25, 0.2, a), format!("{:.0}  KILL", d.amount.round()))
+            } else if d.headshot {
+                (Color::new(1.0, 0.85, 0.2, a), format!("{:.0}  HS", d.amount.round()))
+            } else {
+                (Color::new(1.0, 1.0, 1.0, a), format!("{:.0}", d.amount.round()))
+            };
+            let size = (22.0 + (d.amount / 100.0).min(1.0) * 10.0) * s * (1.0 + (0.12 - age).max(0.0) * 3.0);
+            let w = text_width(&label, size);
+            text(&label, x - w * 0.5 + 1.5, y + 1.5, size, Color::new(0.0, 0.0, 0.0, a * 0.8));
+            text(&label, x - w * 0.5, y, size, c);
         }
     }
 
@@ -1092,6 +1187,11 @@ impl App {
             format!("recoil x{:.2}", m.recoil),
             format!("spread x{:.2}", m.spread),
             format!("speed {:+.0}", m.speed),
+            {
+                let base = weapons::Weapon::new(wp.id);
+                let far = wp.damage_at(2000.0) / base.damage_at(2000.0).max(0.01);
+                format!("damage at 2000 units x{far:.2}")
+            },
             if m.silenced { "silenced".to_string() } else { String::new() },
         ] {
             text(&l, rx, ry, 16.0 * s, Color::new(0.85, 0.85, 0.85, 1.0));
@@ -1419,6 +1519,7 @@ async fn main() {
         fps_frames: 0,
         was_alive: true,
         num_edit: NumEdit::default(),
+        damage_popups: Vec::new(),
         inventory: false,
         inv_tab: 0,
         inv_slot: Slot::Primary,
@@ -1432,13 +1533,14 @@ async fn main() {
 
     // Screenshot mode: optionally start a match, fast forward and capture.
     if let Some(path) = args.shot.clone() {
-        if matches!(args.ui.as_deref(), Some("editor") | Some("editor4")) {
+        if args.ui.as_deref().is_some_and(|u| u.starts_with("editor")) {
             app.open_editor();
             if let Some(ed) = app.editor.as_mut() {
-                if args.ui.as_deref() == Some("editor4") {
-                    ed.debug_quad();
-                } else {
-                    ed.debug_select_first_ramp();
+                match args.ui.as_deref() {
+                    Some("editor4") => ed.debug_quad(),
+                    Some("editor") => ed.debug_select_first_ramp(),
+                    Some(m) => ed.debug_mode(m),
+                    None => {}
                 }
             }
             for frame in 0..3 {
@@ -1548,6 +1650,41 @@ async fn main() {
                     if matches!(args.ui.as_deref(), Some("ads") | Some("holo")) {
                         p.zoom = 1;
                         app.renderer.ads = 1.0;
+                    }
+                }
+            }
+            Some("damage") => {
+                // shoot a dummy a few times so the damage numbers show
+                if let Some(li) = app.game.local {
+                    let my_team = app.game.players[li].team;
+                    let t = app.game.players.iter().position(|p| p.team != my_team).unwrap_or(0);
+                    let me = vec3(-4200.0, -300.0, 2436.0);
+                    let them = vec3(-3900.0, -120.0, 2436.0);
+                    app.game.players[li].pm = PmState::new(me);
+                    app.game.players[t].pm = PmState::new(them);
+                    app.game.players[t].bot = None;
+                    app.game.players[t].alive = true;
+                    app.game.players[t].health = 100.0;
+                    app.game.give(li, weapons::WeaponId::Ak47);
+                    app.game.players[li].next_attack = 0.0;
+                    for tick in 0..60 {
+                        let eye = app.game.players[li].pm.eye();
+                        let target =
+                            app.game.players[t].pm.origin + vec3(0.0, 0.0, if tick < 30 { 10.0 } else { 26.0 });
+                        let (pitch, yaw) = util::vec_to_angles(target - eye);
+                        app.view = vec3(pitch, yaw, 0.0);
+                        let fire = tick % 12 == 0;
+                        let cmd = UserCmd {
+                            msec: 10,
+                            viewangles: app.view,
+                            buttons: if fire { IN_ATTACK } else { 0 },
+                            ..Default::default()
+                        };
+                        app.game.players[t].pm.origin = them;
+                        app.game.step(Some(cmd));
+                        let ev = std::mem::take(&mut app.game.events);
+                        app.collect_damage(&ev);
+                        app.renderer.handle_events(&app.game, &ev);
                     }
                 }
             }

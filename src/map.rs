@@ -205,6 +205,33 @@ pub struct Booster {
     pub push: Push,
 }
 
+/// Where a teleport sends you.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TeleDest {
+    /// Back to your team's spawn (for the bottom of the map).
+    TeamSpawn,
+    /// A fixed spot, facing `yaw`.
+    Point { pos: Vec3, yaw: f32 },
+}
+
+/// A `trigger_teleport`: touching the volume moves you to the destination
+/// and stops you dead, like in Half-Life.
+#[derive(Clone, Copy, Debug)]
+pub struct Teleport {
+    pub zone: Aabb,
+    pub dest: TeleDest,
+}
+
+impl Teleport {
+    pub fn to_spawn(zone: Aabb) -> Teleport {
+        Teleport { zone, dest: TeleDest::TeamSpawn }
+    }
+
+    pub fn to_point(zone: Aabb, pos: Vec3, yaw: f32) -> Teleport {
+        Teleport { zone, dest: TeleDest::Point { pos, yaw } }
+    }
+}
+
 /// Acceleration of a booster, in units per second squared.
 pub const BOOST_ACCEL: f32 = 2400.0;
 
@@ -263,12 +290,56 @@ pub struct Map {
     pub boosters: Vec<Booster>,
     /// Sky ramps of the built-in maps (used by tests to check they work).
     pub sky: Vec<SkyRamp>,
+    /// `trigger_teleport` volumes, like on CS surf maps.
+    pub teleports: Vec<Teleport>,
     pub routes: Vec<Route>,
     pub sky_top: [f32; 3],
     pub sky_horizon: [f32; 3],
     pub fog_color: [f32; 3],
     pub fog_start: f32,
     pub fog_end: f32,
+    /// Skybox scenery on the horizon.
+    pub backdrop: Backdrop,
+}
+
+/// Scenery drawn in the skybox (see `backdrop.rs`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Backdrop {
+    None,
+    #[default]
+    City,
+    Mountains,
+    Forest,
+    Mesas,
+}
+
+impl Backdrop {
+    pub const ALL: [Backdrop; 5] =
+        [Backdrop::City, Backdrop::Mountains, Backdrop::Forest, Backdrop::Mesas, Backdrop::None];
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Backdrop::None => "none",
+            Backdrop::City => "city",
+            Backdrop::Mountains => "mountains",
+            Backdrop::Forest => "forest",
+            Backdrop::Mesas => "mesas",
+        }
+    }
+
+    pub fn from_key(k: &str) -> Option<Backdrop> {
+        Backdrop::ALL.iter().copied().find(|b| b.key() == k)
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Backdrop::None => "No scenery",
+            Backdrop::City => "City skyline",
+            Backdrop::Mountains => "Snowy mountains",
+            Backdrop::Forest => "Forest hills",
+            Backdrop::Mesas => "Desert mesas",
+        }
+    }
 }
 
 impl Map {
@@ -308,7 +379,7 @@ impl Map {
     }
 }
 
-pub const BUILTIN_MAPS: [&str; 3] = ["surf_wars", "surf_canyon", "surf_hairpin"];
+pub const BUILTIN_MAPS: [&str; 5] = ["surf_wars", "surf_canyon", "surf_hairpin", "surf_ski", "surf_utopia"];
 
 /// Built-in maps followed by the custom maps saved with the editor.
 pub fn map_names() -> Vec<String> {
@@ -322,6 +393,8 @@ pub fn load(name: &str) -> Map {
         "surf_wars" => surf_wars(),
         "surf_canyon" => surf_canyon(),
         "surf_hairpin" => surf_hairpin(),
+        "surf_ski" => surf_ski(),
+        "surf_utopia" => surf_utopia(),
         _ => match crate::mapfile::load(name) {
             Ok(m) => m,
             Err(e) => {
@@ -664,8 +737,8 @@ fn surf_wars() -> Map {
     let mut b: Vec<Brush> = Vec::new();
 
     // Water at the bottom of the pit (visual only) and a floor below it.
-    b.push(cuboid(vec3(-5200.0, -4000.0, -64.0), vec3(5200.0, 4000.0, 0.0), FLOOR));
-    b.push(cuboid(vec3(-5200.0, -4000.0, 0.0), vec3(5200.0, 4000.0, 120.0), WATER));
+    b.push(cuboid(vec3(-13000.0, -12000.0, -64.0), vec3(13000.0, 12000.0, 0.0), FLOOR));
+    b.push(cuboid(vec3(-13000.0, -12000.0, 0.0), vec3(13000.0, 12000.0, 120.0), WATER));
 
     // Surf lanes.
     for (yc, mat) in [(SW_LANE_Y, RAMP_A), (-SW_LANE_Y, RAMP_B)] {
@@ -779,7 +852,7 @@ fn surf_wars() -> Map {
         perch_line(&mut b, &[(0.0, ys * 640.0), (0.0, ys * 860.0), (0.0, ys * 1075.0)], (0.0, ys * 1300.0), iz, PERCH);
     }
 
-    boundary(&mut b, vec3(5100.0, 3950.0, 0.0), 4600.0);
+    boundary(&mut b, vec3(12900.0, 11900.0, 0.0), 14000.0);
 
     // Spawns.
     let mut spawns: [Vec<Spawn>; 2] = [Vec::new(), Vec::new()];
@@ -881,6 +954,7 @@ fn surf_wars() -> Map {
 
     // Launch pads at the front of the spawns that throw you onto the lanes.
     let mut boosters = Vec::new();
+    let teleports = Vec::new();
     let mut pads = Vec::new();
     for ys in [-1.0f32, 1.0] {
         let tx = -1200.0;
@@ -930,13 +1004,15 @@ fn surf_wars() -> Map {
         buyzones,
         pickups,
         boosters,
+        teleports,
         sky,
         routes,
         sky_top: [0.20, 0.38, 0.72],
         sky_horizon: [0.78, 0.86, 0.95],
         fog_color: [0.72, 0.80, 0.90],
-        fog_start: 3000.0,
-        fog_end: 14000.0,
+        fog_start: 5000.0,
+        fog_end: 26000.0,
+        backdrop: Backdrop::City,
     }
 }
 
@@ -977,8 +1053,8 @@ fn sc_pillars(ys: f32) -> Vec<(f32, f32, f32)> {
 
 fn surf_canyon() -> Map {
     let mut b: Vec<Brush> = Vec::new();
-    b.push(cuboid(vec3(-5600.0, -4600.0, -64.0), vec3(5600.0, 4600.0, 0.0), FLOOR));
-    b.push(cuboid(vec3(-5600.0, -4600.0, 0.0), vec3(5600.0, 4600.0, 120.0), WATER));
+    b.push(cuboid(vec3(-13500.0, -12500.0, -64.0), vec3(13500.0, 12500.0, 0.0), FLOOR));
+    b.push(cuboid(vec3(-13500.0, -12500.0, 0.0), vec3(13500.0, 12500.0, 120.0), WATER));
 
     // Three parallel lanes: a central wide one and two narrower outside.
     let lanes: [(f32, f32, f32, Mat); 3] =
@@ -1045,7 +1121,7 @@ fn surf_canyon() -> Map {
         perch_line(&mut b, &[(0.0, ys * 520.0), (0.0, ys * 330.0)], (0.0, 0.0), pz, PERCH);
     }
 
-    boundary(&mut b, vec3(5700.0, 4500.0, 0.0), 4800.0);
+    boundary(&mut b, vec3(13400.0, 12400.0, 0.0), 14000.0);
 
     let mut spawns: [Vec<Spawn>; 2] = [Vec::new(), Vec::new()];
     for (ti, s) in [(0usize, -1.0f32), (1, 1.0)] {
@@ -1128,6 +1204,7 @@ fn surf_canyon() -> Map {
     routes.extend(mirrored);
 
     let mut boosters = Vec::new();
+    let teleports = Vec::new();
     let mut pads = Vec::new();
     for ys in [-1.0f32, 1.0] {
         let tx = -2000.0;
@@ -1174,13 +1251,15 @@ fn surf_canyon() -> Map {
         buyzones,
         pickups,
         boosters,
+        teleports,
         sky,
         routes,
         sky_top: [0.55, 0.30, 0.35],
         sky_horizon: [0.98, 0.72, 0.50],
         fog_color: [0.92, 0.70, 0.55],
-        fog_start: 2500.0,
-        fog_end: 13000.0,
+        fog_start: 4500.0,
+        fog_end: 24000.0,
+        backdrop: Backdrop::Mesas,
     }
 }
 
@@ -1258,8 +1337,8 @@ fn turn_route(
 
 fn surf_hairpin() -> Map {
     let mut b: Vec<Brush> = Vec::new();
-    b.push(cuboid(vec3(-9800.0, -5600.0, -64.0), vec3(9800.0, 5600.0, 0.0), FLOOR));
-    b.push(cuboid(vec3(-9800.0, -5600.0, 0.0), vec3(9800.0, 5600.0, 120.0), WATER));
+    b.push(cuboid(vec3(-17000.0, -13500.0, -64.0), vec3(17000.0, 13500.0, 0.0), FLOOR));
+    b.push(cuboid(vec3(-17000.0, -13500.0, 0.0), vec3(17000.0, 13500.0, 120.0), WATER));
 
     // Geometry of the T track; the CT track is the same rotated by 180.
     // leg0: south along x=-8500 from y=200 to -1500
@@ -1329,7 +1408,7 @@ fn surf_hairpin() -> Map {
         b.push(block(x, y, h, fz, fz + h * 2.0, CRATE));
     }
 
-    boundary(&mut b, vec3(9700.0, 5500.0, 0.0), 6600.0);
+    boundary(&mut b, vec3(16900.0, 13400.0, 0.0), 16000.0);
 
     let mut spawns: [Vec<Spawn>; 2] = [Vec::new(), Vec::new()];
     for (ti, s) in [(0usize, 1.0f32), (1, -1.0)] {
@@ -1404,6 +1483,7 @@ fn surf_hairpin() -> Map {
 
     // Launch pad from the spawn onto the far face of the first ramp.
     let mut boosters = Vec::new();
+    let teleports = Vec::new();
     let t = (-400.0 + 1500.0) / 1700.0;
     let target = vec3(-8500.0 - 280.0, -400.0, lerp(z_leg0, 1.0 - t) - 420.0 + 60.0);
     let pad = vec3(-9150.0, 480.0, HP_SPAWN_Z);
@@ -1447,13 +1527,15 @@ fn surf_hairpin() -> Map {
         buyzones,
         pickups,
         boosters,
+        teleports,
         sky,
         routes,
         sky_top: [0.12, 0.22, 0.45],
         sky_horizon: [0.62, 0.72, 0.88],
         fog_color: [0.55, 0.64, 0.80],
-        fog_start: 4000.0,
-        fog_end: 20000.0,
+        fog_start: 6000.0,
+        fog_end: 30000.0,
+        backdrop: Backdrop::Forest,
     }
 }
 
@@ -1475,4 +1557,360 @@ fn hp_pillars() -> Vec<(f32, f32, f32)> {
         v.push((*x, y, HP_SPAWN_Z));
     }
     v
+}
+
+// ---------------------------------------------------------------------------
+// surf_ski
+//
+// After the CS 1.6 classic surf_ski_2: each spawn has two steep ski chutes
+// that end in kickers throwing you over a big double sided ski hill in the
+// middle, long flat side lanes run the length of the map, a teleport booth in
+// each spawn leads to a sniper perch floating over the hill, and teleports
+// at the bottom send you back to your spawn.
+
+const SK_SPAWN_Z: f32 = 3000.0;
+const SK_CHUTE_Y: f32 = 1100.0;
+const SK_SIDE_Y: f32 = 2900.0;
+const SNOW: Mat = Mat::new(Tex::Grid, [232, 238, 246]);
+const ICE: Mat = Mat::new(Tex::Grid, [140, 195, 240]);
+const ICE2: Mat = Mat::new(Tex::Grid, [95, 150, 225]);
+
+/// Ridge height of the T chutes (x < 0): a steep ski slope, then the kicker.
+pub fn ski_ridge(x: f32) -> f32 {
+    if x <= -5200.0 {
+        2700.0
+    } else if x <= -2600.0 {
+        2700.0 - 1200.0 * (x + 5200.0) / 2600.0
+    } else {
+        1500.0 + 350.0 * (x + 2600.0).min(1100.0) / 1100.0
+    }
+}
+
+fn surf_ski() -> Map {
+    let mut b: Vec<Brush> = Vec::new();
+    b.push(cuboid(vec3(-14000.0, -12000.0, -64.0), vec3(14000.0, 12000.0, 0.0), FLOOR));
+    b.push(cuboid(vec3(-14000.0, -12000.0, 0.0), vec3(14000.0, 12000.0, 120.0), WATER));
+    let z = SK_SPAWN_Z;
+
+    // T side (x < 0), mirrored for CT.
+    for (s, team_mat, trim) in [(-1.0f32, SPAWN_T, TRIM_T), (1.0, SPAWN_CT, TRIM_CT)] {
+        let mut local: Vec<Brush> = Vec::new();
+        banded_slab(
+            &mut local,
+            -6200.0,
+            -5200.0,
+            z - 64.0,
+            z,
+            &[(-900.0, -588.0, tint(team_mat, ICE)), (-588.0, 588.0, team_mat), (588.0, 900.0, tint(team_mat, ICE))],
+        );
+        local.push(cuboid(vec3(-6264.0, -900.0, z - 64.0), vec3(-6200.0, 900.0, z + 320.0), trim));
+        // walkways out to the side lanes
+        for ys in [-1.0f32, 1.0] {
+            let (a, c) = (ys * 900.0, ys * 2400.0);
+            local.push(cuboid(vec3(-6200.0, a.min(c), z - 64.0), vec3(-5700.0, a.max(c), z), team_mat));
+        }
+        // ski chutes and kickers
+        for yc in [SK_CHUTE_Y, -SK_CHUTE_Y] {
+            local.push(ramp_x(-5200.0, -2600.0, yc, ski_ridge(-5200.0), ski_ridge(-2600.0), 512.0, 768.0, ICE));
+            local.push(ramp_x(-2600.0, -1500.0, yc, ski_ridge(-2600.0), ski_ridge(-1500.0), 512.0, 768.0, ICE2));
+        }
+        // teleport booth at the back of the spawn
+        local.push(cuboid(vec3(-6200.0, -900.0, z), vec3(-6150.0, -880.0, z + 130.0), trim));
+        local.push(cuboid(vec3(-6200.0, -720.0, z), vec3(-6150.0, -700.0, z + 130.0), trim));
+        local.push(cuboid(vec3(-6200.0, -900.0, z + 130.0), vec3(-6150.0, -700.0, z + 150.0), trim));
+        local.push(block(-5500.0, 450.0, 32.0, z, z + 64.0, CRATE));
+        local.push(block(-5500.0, -450.0, 32.0, z, z + 64.0, CRATE));
+        for br in local {
+            let pts: Vec<Vec3> = br.points.iter().map(|p| vec3(p.x * -s, p.y, p.z)).collect();
+            b.push(Brush::hull(&pts, br.mat));
+        }
+    }
+    // Long flat side lanes and the ski hill in the middle.
+    for ys in [-1.0f32, 1.0] {
+        b.push(ramp_x(-6200.0, 6200.0, ys * SK_SIDE_Y, 2300.0, 2300.0, 512.0, 768.0, SNOW));
+    }
+    b.push(ramp_y(-2600.0, 2600.0, 0.0, 1700.0, 1700.0, 700.0, 1000.0, SNOW));
+    // Sniper perch floating over the hill, reached by the spawn booths.
+    b.push(cuboid(vec3(-260.0, -260.0, 3336.0), vec3(260.0, 260.0, 3400.0), PERCH));
+    b.push(block(0.0, 180.0, 28.0, 3400.0, 3456.0, CRATE));
+    b.push(block(0.0, -180.0, 28.0, 3400.0, 3456.0, CRATE));
+
+    boundary(&mut b, vec3(13900.0, 11900.0, 0.0), 14000.0);
+
+    let mut spawns: [Vec<Spawn>; 2] = [Vec::new(), Vec::new()];
+    for (ti, s) in [(0usize, -1.0f32), (1, 1.0)] {
+        for x in [5950.0, 5650.0] {
+            for y in [-600.0, -300.0, 0.0, 300.0, 600.0] {
+                spawns[ti].push(Spawn { pos: vec3(x * s, y, z + 37.0), yaw: if s < 0.0 { 0.0 } else { 180.0 } });
+            }
+        }
+    }
+    let buyzones = [
+        Aabb::new(vec3(-6300.0, -2500.0, z - 100.0), vec3(-5150.0, 2500.0, z + 400.0)),
+        Aabb::new(vec3(5150.0, -2500.0, z - 100.0), vec3(6300.0, 2500.0, z + 400.0)),
+    ];
+
+    let pickups = vec![
+        gun(WeaponId::Awp, 0.0, 0.0, 3424.0),
+        att(AttItem::Sight(Sight::Holo), 0.0, 0.0, 3462.0),
+        gun(WeaponId::Ak47, 0.0, SK_SIDE_Y, 2340.0),
+        gun(WeaponId::Ak47, 0.0, -SK_SIDE_Y, 2340.0),
+        att(AttItem::Grip(Grip::Vertical), -3000.0, SK_SIDE_Y, 2340.0),
+        att(AttItem::Muzzle(Muzzle::Compensator), 3000.0, -SK_SIDE_Y, 2340.0),
+        att(AttItem::Sight(Sight::RedDot), 3000.0, SK_SIDE_Y, 2340.0),
+        att(AttItem::Stock(Stock::Light), -3000.0, -SK_SIDE_Y, 2340.0),
+        health(-250.0, 1500.0, 1560.0),
+        health(250.0, -1500.0, 1560.0),
+        health(0.0, 700.0, 1760.0),
+        health(0.0, -700.0, 1760.0),
+    ];
+
+    let mut boosters = Vec::new();
+    for s in [-1.0f32, 1.0] {
+        for yc in [SK_CHUTE_Y, -SK_CHUTE_Y] {
+            // kickers push toward the middle (T side: +x)
+            let (xa, xb) = (-2600.0 * -s, -1500.0 * -s);
+            let zone =
+                Aabb::new(vec3(xa.min(xb), yc - 512.0, 1500.0 - 768.0), vec3(xa.max(xb), yc + 512.0, 1850.0 + 48.0));
+            boosters.push(Booster::boost(zone, vec3(-s, 0.0, 0.32), 1900.0));
+        }
+    }
+    let teleports = vec![
+        // spawn booths to the perch
+        Teleport::to_point(
+            Aabb::new(vec3(-6195.0, -875.0, z), vec3(-6150.0, -725.0, z + 110.0)),
+            vec3(-150.0, 0.0, 3437.0),
+            0.0,
+        ),
+        Teleport::to_point(
+            Aabb::new(vec3(6150.0, -875.0, z), vec3(6195.0, -725.0, z + 110.0)),
+            vec3(150.0, 0.0, 3437.0),
+            180.0,
+        ),
+        // the bottom of the map
+        Teleport::to_spawn(Aabb::new(vec3(-14000.0, -12000.0, -300.0), vec3(14000.0, 12000.0, 640.0))),
+    ];
+
+    // Bot routes (T side, mirrored for CT).
+    let mut routes = Vec::new();
+    let depth = 280.0;
+    for ys in [1.0f32, -1.0] {
+        let face_y = ys * (SK_CHUTE_Y - depth / 1.5);
+        let mut pts = vec![wp(-5700.0, ys * 780.0, z, WpMode::Walk), wp(-5150.0, ys * 780.0, z, WpMode::Drop)];
+        for x in [-4700.0, -3900.0, -3100.0, -2400.0, -1700.0] {
+            pts.push(wp(x, face_y, ski_ridge(x) - depth, WpMode::Surf));
+        }
+        routes.push(Route {
+            team: Team::T,
+            kind: RouteKind::Surf,
+            name: format!("chute {}", if ys > 0.0 { "north" } else { "south" }),
+            points: pts,
+        });
+        let side_face = ys * (SK_SIDE_Y - depth / 1.5);
+        let mut pts = vec![
+            wp(-5950.0, ys * 800.0, z, WpMode::Walk),
+            wp(-5950.0, ys * 2250.0, z, WpMode::Walk),
+            wp(-5950.0, ys * 2430.0, z, WpMode::Drop),
+        ];
+        for x in [-5000.0, -3000.0, -1000.0, 1000.0, 3000.0, 5000.0] {
+            pts.push(wp(x, side_face, 2300.0 - depth, WpMode::Surf));
+        }
+        routes.push(Route {
+            team: Team::T,
+            kind: RouteKind::Surf,
+            name: format!("side lane {}", if ys > 0.0 { "north" } else { "south" }),
+            points: pts,
+        });
+    }
+    let mirrored: Vec<Route> = routes.iter().map(mirror_route).collect();
+    routes.extend(mirrored);
+
+    Map {
+        name: "surf_ski".into(),
+        world: CollisionWorld::new(b),
+        spawns,
+        kill_z: 100.0,
+        buyzones,
+        pickups,
+        boosters,
+        teleports,
+        sky: Vec::new(),
+        routes,
+        sky_top: [0.22, 0.42, 0.78],
+        sky_horizon: [0.84, 0.9, 0.97],
+        fog_color: [0.84, 0.89, 0.95],
+        fog_start: 5000.0,
+        fog_end: 26000.0,
+        backdrop: Backdrop::Mountains,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// surf_utopia
+//
+// After the CS 1.6 classic surf_utopia: each team starts on a platform high
+// in the sky and surfs three long, wide stages, dropping from the end of one
+// onto the start of the next, down to a floating arena in the middle.
+// Falling off a stage teleports you back to its start, like the checkpoint
+// teleports on the real map.
+
+const UT_SPAWN_Z: f32 = 7200.0;
+const UT_TRACK_Y: f32 = 1500.0;
+const UT_HW: f32 = 640.0;
+const UT_H: f32 = 960.0;
+const UT_ARENA_Z: f32 = 2750.0;
+/// T stages (x0, x1, ridge z0, ridge z1); CT is the same rotated 180 degrees.
+const UT_STAGES: [(f32, f32, f32, f32); 3] =
+    [(-9300.0, -6800.0, 6800.0, 6000.0), (-6400.0, -4000.0, 5400.0, 4600.0), (-3600.0, -1750.0, 4000.0, 3500.0)];
+
+pub fn ut_ridge(stage: usize, x: f32) -> f32 {
+    let (x0, x1, z0, z1) = UT_STAGES[stage];
+    z0 + (z1 - z0) * ((x - x0) / (x1 - x0)).clamp(0.0, 1.0)
+}
+
+fn surf_utopia() -> Map {
+    let mut b: Vec<Brush> = Vec::new();
+    b.push(cuboid(vec3(-17500.0, -12500.0, -64.0), vec3(17500.0, 12500.0, 0.0), FLOOR));
+    b.push(cuboid(vec3(-17500.0, -12500.0, 0.0), vec3(17500.0, 12500.0, 120.0), WATER));
+    let mats = [
+        Mat::new(Tex::Grid, [232, 232, 240]),
+        Mat::new(Tex::Grid, [240, 205, 120]),
+        Mat::new(Tex::Grid, [150, 205, 250]),
+    ];
+    let y = UT_TRACK_Y;
+    let sz = UT_SPAWN_Z;
+    for (s, team_mat, trim) in [(1.0f32, SPAWN_T, TRIM_T), (-1.0, SPAWN_CT, TRIM_CT)] {
+        let r = |p: Vec3| vec3(p.x * s, p.y * s, p.z);
+        let mut local: Vec<Brush> = Vec::new();
+        local.push(cuboid(vec3(-10400.0, y - 600.0, sz - 64.0), vec3(-9300.0, y + 600.0, sz), tint(team_mat, mats[0])));
+        local.push(cuboid(vec3(-10464.0, y - 600.0, sz - 64.0), vec3(-10400.0, y + 600.0, sz + 320.0), trim));
+        for ys in [-1.0f32, 1.0] {
+            let (a, c) = (y + ys * 600.0, y + ys * 632.0);
+            local.push(cuboid(vec3(-10400.0, a.min(c), sz), vec3(-9800.0, a.max(c), sz + 48.0), trim));
+        }
+        for (i, (x0, x1, z0, z1)) in UT_STAGES.iter().enumerate() {
+            local.push(ramp_x(*x0, *x1, y, *z0, *z1, UT_HW, UT_H, mats[i]));
+        }
+        for br in local {
+            let pts: Vec<Vec3> = br.points.iter().map(|p| r(*p)).collect();
+            b.push(Brush::hull(&pts, br.mat));
+        }
+    }
+    // The arena: a floating platform with cover and a small tower.
+    let az = UT_ARENA_Z;
+    b.push(cuboid(
+        vec3(-1650.0, -2300.0, az - 96.0),
+        vec3(1650.0, 2300.0, az),
+        Mat::new(Tex::Concrete, [200, 195, 185]),
+    ));
+    b.push(cuboid(vec3(-200.0, -200.0, az), vec3(200.0, 200.0, az + 200.0), METAL));
+    for (i, (x, yy)) in [(-330.0, 0.0), (-460.0, 0.0), (330.0, 0.0), (460.0, 0.0)].iter().enumerate() {
+        let top = az + if i % 2 == 0 { 80.0 } else { 40.0 };
+        b.push(block(*x, *yy, 60.0, az, top.min(az + 160.0), CRATE));
+    }
+    b.push(block(-330.0, 0.0, 60.0, az, az + 80.0, CRATE));
+    b.push(block(-260.0, 0.0, 40.0, az + 80.0, az + 140.0, CRATE));
+    b.push(block(260.0, 0.0, 40.0, az + 80.0, az + 140.0, CRATE));
+    for (x, yy) in [(-900.0, 900.0), (900.0, -900.0), (-900.0, -900.0), (900.0, 900.0), (0.0, 1600.0), (0.0, -1600.0)] {
+        b.push(block(x, yy, 48.0, az, az + 96.0, CRATE));
+    }
+    boundary(&mut b, vec3(17400.0, 12400.0, 0.0), 12000.0);
+
+    let mut spawns: [Vec<Spawn>; 2] = [Vec::new(), Vec::new()];
+    for (ti, s) in [(0usize, 1.0f32), (1, -1.0)] {
+        for x in [-10200.0, -9950.0, -9700.0] {
+            for yy in [y - 400.0, y, y + 400.0] {
+                spawns[ti].push(Spawn { pos: vec3(x * s, yy * s, sz + 37.0), yaw: if s > 0.0 { 0.0 } else { 180.0 } });
+            }
+        }
+    }
+    let buyzones = [
+        Aabb::new(vec3(-10500.0, y - 700.0, sz - 100.0), vec3(-9250.0, y + 700.0, sz + 400.0)),
+        Aabb::new(vec3(9250.0, -y - 700.0, sz - 100.0), vec3(10500.0, -y + 700.0, sz + 400.0)),
+    ];
+    let mut pickups = vec![
+        gun(WeaponId::Awp, 0.0, 0.0, az + 224.0),
+        att(AttItem::Sight(Sight::Acog), 0.0, 0.0, az + 262.0),
+        health(-600.0, 0.0, az + 24.0),
+        health(600.0, 0.0, az + 24.0),
+    ];
+    for s in [1.0f32, -1.0] {
+        pickups.push(gun(WeaponId::Ak47, -1200.0 * s, -2000.0 * s, az + 24.0));
+        pickups.push(att(AttItem::Grip(Grip::Stubby), -1200.0 * s, -2000.0 * s, az + 62.0));
+        // floating over the second stage: grab it while surfing
+        pickups.push(health(-5200.0 * s, (y - 200.0) * s, ut_ridge(1, -5200.0) - 260.0));
+        let item = if s > 0.0 { AttItem::Muzzle(Muzzle::LongBarrel) } else { AttItem::Stock(Stock::Heavy) };
+        pickups.push(att(item, -2800.0 * s, (y + 200.0) * s, ut_ridge(2, -2800.0) - 260.0));
+    }
+
+    let mut boosters = Vec::new();
+    let mut teleports = Vec::new();
+    for s in [1.0f32, -1.0] {
+        let turn = |a: Aabb| a.turned(s);
+        for stage in [1usize, 2] {
+            let (x0, x1, z0, z1) = UT_STAGES[stage];
+            let xa = x0 + (x1 - x0) * 0.25;
+            let xb = x0 + (x1 - x0) * 0.6;
+            let zone = Aabb::new(vec3(xa, y - UT_HW, z1 - UT_H), vec3(xb, y + UT_HW, z0 + 48.0));
+            let d = vec3(x1 - x0, 0.0, z1 - z0).normalize();
+            boosters.push(Booster::boost(turn(zone), vec3(d.x * s, 0.0, d.z), 2000.0));
+        }
+        // checkpoint teleports under stages 2 and 3: back onto the stage start
+        for (stage, xa, xb) in [(1usize, -6600.0f32, -3800.0f32), (2, -3800.0, -1700.0)] {
+            let (x0, _, z0, _) = UT_STAGES[stage];
+            let bottom = UT_STAGES[stage].3 - UT_H - 240.0;
+            let zone = Aabb::new(vec3(xa, y - 1400.0, -300.0), vec3(xb, y + 1400.0, bottom));
+            let x = x0 + 250.0;
+            let dest = vec3(x, y - 250.0, ut_ridge(stage, x) - 250.0 * UT_H / UT_HW + 90.0);
+            let _ = z0;
+            teleports.push(Teleport::to_point(
+                turn(zone),
+                vec3(dest.x * s, dest.y * s, dest.z),
+                if s > 0.0 { 0.0 } else { 180.0 },
+            ));
+        }
+    }
+    // everything else below the arena goes back to spawn
+    teleports.push(Teleport::to_spawn(Aabb::new(vec3(-17500.0, -12500.0, -300.0), vec3(17500.0, 12500.0, 2300.0))));
+
+    // Bot routes (T, rotated for CT).
+    let mut routes = Vec::new();
+    let depth = 280.0;
+    let off = depth * UT_HW / UT_H;
+    for (face, name) in [(-1.0f32, "inner"), (1.0f32, "outer")] {
+        let fy = y + face * off;
+        let mut pts =
+            vec![wp(-9900.0, y + face * 250.0, sz, WpMode::Walk), wp(-9280.0, y + face * 250.0, sz, WpMode::Drop)];
+        let xs: [&[f32]; 3] =
+            [&[-8800.0, -7900.0, -7000.0], &[-6100.0, -5200.0, -4300.0], &[-3300.0, -2600.0, -1950.0]];
+        for (stage, list) in xs.iter().enumerate() {
+            for x in list.iter() {
+                pts.push(wp(*x, fy, ut_ridge(stage, *x) - depth, WpMode::Surf));
+            }
+        }
+        pts.push(wp(-900.0, 1100.0, az, WpMode::Walk));
+        pts.push(wp(-600.0, 600.0, az, WpMode::Hold));
+        routes.push(Route { team: Team::T, kind: RouteKind::Surf, name: format!("stages {name}"), points: pts });
+    }
+    let rotated: Vec<Route> = routes.iter().map(rotate_route).collect();
+    routes.extend(rotated);
+
+    Map {
+        name: "surf_utopia".into(),
+        world: CollisionWorld::new(b),
+        spawns,
+        kill_z: 450.0,
+        buyzones,
+        pickups,
+        boosters,
+        teleports,
+        sky: Vec::new(),
+        routes,
+        sky_top: [0.08, 0.1, 0.3],
+        sky_horizon: [0.95, 0.58, 0.42],
+        fog_color: [0.72, 0.5, 0.5],
+        fog_start: 6000.0,
+        fog_end: 34000.0,
+        backdrop: Backdrop::City,
+    }
 }

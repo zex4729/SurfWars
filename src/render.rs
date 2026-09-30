@@ -175,6 +175,7 @@ pub struct Textures {
     pub concrete: Texture2D,
     pub water: Texture2D,
     pub glow: Texture2D,
+    pub windows: Texture2D,
 }
 
 impl Textures {
@@ -245,7 +246,8 @@ impl Textures {
             let a = (1.0 - r).clamp(0.0, 1.0).powf(2.0);
             [255, 255, 255, (a * 255.0) as u8]
         });
-        Textures { grid, crate_, metal, concrete, water, glow }
+        let windows = make_texture(64, crate::backdrop::window_pixel);
+        Textures { grid, crate_, metal, concrete, water, glow, windows }
     }
 
     fn for_tex(&self, t: Tex) -> &Texture2D {
@@ -440,6 +442,8 @@ pub struct Renderer {
     time: f64,
     /// Chevrons painted on boosters and launch pads.
     boost_marks: Vec<BoostMark>,
+    /// Skybox scenery around the camera.
+    backdrop: Vec<Mesh>,
     /// Aim down sights blend for the local view model (0 hip, 1 aimed).
     pub ads: f32,
 }
@@ -555,12 +559,14 @@ impl Renderer {
             rng: Rng::new(99),
             time: 0.0,
             boost_marks: Vec::new(),
+            backdrop: Vec::new(),
             ads: 0.0,
         };
         r.fx.tex = Some(r.tex.glow.clone());
         r.decal.tex = Some(r.tex.glow.clone());
         r.build_world(game);
         r.build_boost_marks(game);
+        r.backdrop = crate::backdrop::build(&game.map, &r.tex.windows);
         r
     }
 
@@ -570,6 +576,7 @@ impl Renderer {
         self.sky = build_sky(game);
         self.build_world(game);
         self.build_boost_marks(game);
+        self.backdrop = crate::backdrop::build(&game.map, &self.tex.windows);
     }
 
     fn build_boost_marks(&mut self, game: &Game) {
@@ -857,6 +864,19 @@ impl Renderer {
             self.fx.sprite(sun_pos, sr, su, 2600.0, [255, 250, 225, 255]);
             self.fx.sprite(sun_pos, sr, su, 7000.0, [255, 235, 190, 90]);
             self.fx.flush(Some(&self.tex.glow));
+            // Skybox scenery rides along with the camera.
+            gl_use_default_material();
+            unsafe {
+                get_internal_gl().quad_gl.push_model_matrix(Mat4::from_translation(view.pos));
+            }
+            for m in &self.backdrop {
+                draw_mesh(m);
+            }
+            unsafe {
+                get_internal_gl().quad_gl.pop_model_matrix();
+            }
+            // The sky is infinitely far: the world always draws over it.
+            clear_depth();
         }
 
         // World.
@@ -1161,7 +1181,7 @@ pub fn camera_for(view: &View) -> Camera3D {
         up,
         fovy: vfov(view.fov),
         z_near: 2.0,
-        z_far: 40000.0,
+        z_far: 150000.0,
         aspect: view.viewport.map(|(_, _, w, h)| w / h.max(1.0)),
         viewport,
         ..Default::default()

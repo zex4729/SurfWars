@@ -187,7 +187,8 @@ pub struct Mods {
     pub ads_spread: f32,
     pub recoil: f32,
     pub damage: f32,
-    /// Added to the range modifier (less damage falloff).
+    /// Added to the range modifier (less damage falloff over distance; for
+    /// the shotgun it stretches the pellets' falloff range instead).
     pub range_bonus: f32,
     pub reload: f32,
     pub deploy: f32,
@@ -233,9 +234,9 @@ impl Sight {
     pub fn desc(self) -> &'static str {
         match self {
             Sight::Iron => "no zoom",
-            Sight::RedDot => "MOUSE2 aim down sights, -15% spread aimed",
-            Sight::Holo => "MOUSE2 aim down sights, -20% spread aimed, slower draw",
-            Sight::Acog => "4x zoom, -40% spread aimed, slow while aimed",
+            Sight::RedDot => "MOUSE2 aim down sights, -15% spread aimed, +range dmg",
+            Sight::Holo => "MOUSE2 aim down sights, -20% spread aimed, ++range dmg, slower draw",
+            Sight::Acog => "4x zoom, -40% spread aimed, +++range dmg, slow aimed",
         }
     }
 }
@@ -253,9 +254,9 @@ impl Muzzle {
     pub fn desc(self) -> &'static str {
         match self {
             Muzzle::None => "-",
-            Muzzle::Suppressor => "silent, no flash, -15% recoil, -8% damage",
-            Muzzle::Compensator => "-30% recoil, +8% spread",
-            Muzzle::LongBarrel => "+8% damage, less falloff, -8 speed",
+            Muzzle::Suppressor => "silent, no flash, -15% recoil, -8% dmg, +range dmg",
+            Muzzle::Compensator => "-30% recoil, +8% spread, +range dmg",
+            Muzzle::LongBarrel => "+8% damage, ++++range dmg, -8 speed",
         }
     }
 }
@@ -272,8 +273,8 @@ impl Stock {
     pub fn desc(self) -> &'static str {
         match self {
             Stock::Standard => "-",
-            Stock::Light => "+12 speed, -20% air spread, +12% recoil",
-            Stock::Heavy => "-25% recoil, -12 speed",
+            Stock::Light => "+12 speed, -20% air spread, +12% recoil, +range dmg",
+            Stock::Heavy => "-25% recoil, -12 speed, ++range dmg",
         }
     }
 }
@@ -291,9 +292,9 @@ impl Grip {
     pub fn desc(self) -> &'static str {
         match self {
             Grip::None => "-",
-            Grip::Vertical => "-20% recoil",
-            Grip::Angled => "30% faster draw, 15% faster reload",
-            Grip::Stubby => "-25% running spread, -8% recoil",
+            Grip::Vertical => "-20% recoil, ++range dmg",
+            Grip::Angled => "30% faster draw, 15% faster reload, +range dmg",
+            Grip::Stubby => "-25% running spread, -8% recoil, +range dmg",
         }
     }
 }
@@ -437,15 +438,18 @@ impl Attachments {
         match self.sight {
             Sight::Iron => {}
             Sight::RedDot => {
+                m.range_bonus += 0.02;
                 m.zoom = Some(80.0);
                 m.ads_spread = 0.85;
             }
             Sight::Holo => {
+                m.range_bonus += 0.03;
                 m.zoom = Some(72.0);
                 m.ads_spread = 0.8;
                 m.deploy *= 1.1;
             }
             Sight::Acog => {
+                m.range_bonus += 0.045;
                 m.zoom = Some(40.0);
                 m.ads_spread = 0.6;
                 m.ads_speed -= 25.0;
@@ -454,40 +458,49 @@ impl Attachments {
         match self.muzzle {
             Muzzle::None => {}
             Muzzle::Suppressor => {
+                m.range_bonus += 0.02;
                 m.silenced = true;
                 m.recoil *= 0.85;
                 m.damage *= 0.92;
             }
             Muzzle::Compensator => {
+                m.range_bonus += 0.015;
                 m.recoil *= 0.7;
                 m.spread *= 1.08;
             }
             Muzzle::LongBarrel => {
                 m.damage *= 1.08;
-                m.range_bonus += 0.03;
+                m.range_bonus += 0.06;
                 m.speed -= 8.0;
             }
         }
         match self.stock {
             Stock::Standard => {}
             Stock::Light => {
+                m.range_bonus += 0.01;
                 m.speed += 12.0;
                 m.air_spread *= 0.8;
                 m.recoil *= 1.12;
             }
             Stock::Heavy => {
+                m.range_bonus += 0.03;
                 m.recoil *= 0.75;
                 m.speed -= 12.0;
             }
         }
         match self.grip {
             Grip::None => {}
-            Grip::Vertical => m.recoil *= 0.8,
+            Grip::Vertical => {
+                m.recoil *= 0.8;
+                m.range_bonus += 0.025;
+            }
             Grip::Angled => {
+                m.range_bonus += 0.01;
                 m.deploy *= 0.7;
                 m.reload *= 0.85;
             }
             Grip::Stubby => {
+                m.range_bonus += 0.01;
                 m.move_spread *= 0.75;
                 m.recoil *= 0.92;
             }
@@ -673,6 +686,13 @@ impl Weapon {
         }
     }
 
+    /// Damage per hit at `dist` units (before hit groups and armor).
+    pub fn damage_at(&self, dist: f32) -> f32 {
+        let d = self.def();
+        let m = self.mods();
+        m.damage * falloff(self.id, d.range_modifier, m.range_bonus, dist) * d.damage
+    }
+
     /// Number of zoom levels: the built-in scope, or one from a sight.
     pub fn zoom_levels(&self) -> u8 {
         let d = self.def();
@@ -724,6 +744,17 @@ impl Weapon {
 
     pub fn def(&self) -> &'static WeaponDef {
         self.id.def()
+    }
+}
+
+/// CS damage falloff with distance; attachments add `bonus`. The range
+/// modifier never goes over 1 (no damage gain with distance).
+pub fn falloff(id: WeaponId, range_modifier: f32, bonus: f32, dist: f32) -> f32 {
+    if id == WeaponId::M3 {
+        let range = 3000.0 * (1.0 + bonus * 8.0);
+        (1.0 - dist / range).max(0.0)
+    } else {
+        (range_modifier + bonus).min(1.0).powf(dist / 500.0)
     }
 }
 

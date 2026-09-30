@@ -22,6 +22,7 @@ All tests are in `src/tests.rs`, which is a `#[cfg(test)]` module of the binary:
 - `bot_routes` runs one bot along every route of every map and prints how far it got. Setting `BOTLOG=<route name substring>` dumps that route's trajectory.
 - `bot_routes` asserts that the bot reaches the end of every route, so it doubles as a map regression test.
 - `bot_match`, `idle_human_long_run` and `shot_stats` simulate full matches headlessly. `shot_stats` prints hit rates by weapon and by ground/air, which is useful when tuning balance.
+- `weapon_tests::weapon_accuracy` prints a hit rate table for every weapon by distance and stance, plus sprays and sights (the README has a copy of the table; update it when accuracy changes).
 
 ### Headless screenshots
 
@@ -34,7 +35,7 @@ xvfb-run -a -s "-screen 0 1280x720x24" env LIBGL_ALWAYS_SOFTWARE=1 \
 
 Options:
 - `--cam`: `spectate`, `third`, `eye`, `overview`, `possess`, `possess3`
-- `--ui`: `buy`, `scores`, `pause`, `scope`, `attach` (inventory), `ads`, `holo`, `laser`, `rocket`, `movement` (with `--menu`), `editor`, `editor4`
+- `--ui`: `buy`, `scores`, `pause`, `scope`, `attach` (inventory), `ads`, `holo`, `damage`, `laser`, `rocket`, `movement` (with `--menu`), `editor`, `editor4`, `editor_face`, `editor_clip`, `editor_drop`, `editor_paths`
 - `--at x,y,z` with `--look pitch,yaw` gives a free camera, which is the easiest way to frame a map feature
 - also `--menu`, `--map`, `--team t|ct`, `--follow N`, `--after SECONDS`
 
@@ -59,9 +60,13 @@ The possess modes copy a surfing bot's movement state onto the local player. Wit
 
 **Boosters (`map::Booster`)** are trigger volumes applied in `Game::apply_boosters` after movement: `Push::Boost` accelerates along a direction up to a speed (optionally two way), `Push::Launch` is a pad that computes the ballistic velocity to a target point from the current gravity. `sky_ramps` builds each map's launch pad, boosted rising ramp and sky platform; `Map::sky` lists them so `sky_ramps_reach_platforms` can ride each one with a scripted surfer. Bot routes must not cross launch pads.
 
-**Maps (`map.rs`)** are either built-in functions or text files in `maps/` loaded by `mapfile.rs` (`map::load` handles both). A `Map` holds brushes built with `Brush::cuboid` or `Brush::hull(points)` (each `Brush` keeps its `points`, which is what the editor edits and the file format stores), spawns, a `kill_z` fall height, buy zones, `pickups`, fog and sky colours, and bot `Route`s. `turn_ramp` builds curved ramps from segment prisms. Routes are written for the T side and mirrored to CT with `mirror_route` (symmetric in x) or `rotate_route` (surf_hairpin, symmetric under 180° rotation). Each waypoint has a mode (`Walk`, `Drop`, `Hop`, `Surf`, `Hold`) that drives the bot controller. Built-in maps need routes, or bots fall back to `bot::roam`. Register them in `BUILTIN_MAPS` and `load()`. Editor maps have no routes and always roam.
+**Teleports (`map::Teleport`)** are `trigger_teleport` volumes checked in `Game::run_player` right after the boosters: `TeleDest::Point` moves the player there with zero velocity, `TeleDest::TeamSpawn` behaves like falling below `kill_z`. Bots get `on_teleport`.
 
-**Editor (`editor.rs`)** draws the 3D view into a viewport (`View::viewport`) and the Top / Front / Side panes itself with 2D lines under a scissor rect. Drags snapshot the selection (`Snapshot`) and re-apply a transform to the snapshot every frame, so grid snapping never accumulates.
+**Skybox (`backdrop.rs`).** `Map::backdrop` picks scenery that is built into meshes around the origin and drawn after the sky dome with a model matrix translated to the camera, then `clear_depth()` so the world always draws over it. Keep it inside the sky dome radius (30000). Built-in maps are enclosed by large clip boundaries (about ±13000 and 14000 high) so there is room to fly.
+
+**Maps (`map.rs`)** are either built-in functions or text files in `maps/` loaded by `mapfile.rs` (`map::load` handles both). A `Map` holds brushes built with `Brush::cuboid` or `Brush::hull(points)` (each `Brush` keeps its `points`, which is what the editor edits and the file format stores), spawns, a `kill_z` fall height, buy zones, `pickups`, fog and sky colours, and bot `Route`s. `turn_ramp` builds curved ramps from segment prisms. Routes are written for the T side and mirrored to CT with `mirror_route` (symmetric in x) or `rotate_route` (surf_hairpin, symmetric under 180° rotation). Each waypoint has a mode (`Walk`, `Drop`, `Hop`, `Surf`, `Hold`) that drives the bot controller. Built-in maps need routes, or bots fall back to `bot::roam`. Register them in `BUILTIN_MAPS` and `load()`. The map file format also stores routes, so editing a built-in map keeps them; maps without routes make bots roam. `surf_ski` and `surf_utopia` are hand made recreations of the CS 1.6 classics (no BSP loading).
+
+**Editor (`editor.rs`)** draws the 3D view into a viewport (`View::viewport`) and the Top / Front / Side panes itself with 2D lines under a scissor rect. Drags snapshot the selection (`Snapshot`) and re-apply a transform to the snapshot every frame, so grid snapping never accumulates. Tools: `Tool::Face` moves only the points of one face (`Snapshot::Face`, tracked by normal in `Editor::face`), `Tool::Clip` splits a brush with the plane through a 2D view line (`split_brush`). Drop down lists are drawn last in `panel`; while one is open its area is stored in the `MODAL` thread local so buttons underneath ignore the mouse.
 
 **Bots (`bot.rs`).** The surf controller rotates velocity with air-accel pushes perpendicular to the horizontal velocity, toward a look-ahead point on the route line. Pushing straight into a tilted ramp brakes. The bhop controller predicts landing time. On the climbing half of a lane, route waypoints deliberately keep the valley height instead of following the ridge up.
 

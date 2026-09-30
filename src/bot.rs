@@ -590,8 +590,14 @@ fn weapons(g: &Game, i: usize, b: &mut BotBrain, cmd: &mut UserCmd, visible: boo
         }
         _ => 8000.0,
     };
-    // Better accuracy from attachments lets the bot take longer shots.
-    if dist > max_range / accuracy.max(0.3) {
+    // Better accuracy and less damage falloff from attachments let the bot
+    // take longer shots.
+    let range_gain = p
+        .weapon()
+        .map(|w| w.damage_at(1500.0) / crate::weapons::Weapon::new(id).damage_at(1500.0).max(0.01))
+        .unwrap_or(1.0)
+        .clamp(1.0, 1.6);
+    if dist > max_range * range_gain / accuracy.max(0.3) {
         return;
     }
     // Snipers only shoot when they are (nearly) standing still.
