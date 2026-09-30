@@ -8,6 +8,8 @@
 //! brush grid 70 170 235 | x y z | x y z | ...
 //! spawn t x y z yaw
 //! pickup health x y z
+//! boost minx miny minz maxx maxy maxz dirx diry dirz speed two_way(0/1)
+//! launch padx pady padz targetx targety targetz seconds
 //! ```
 //!
 //! Every brush is stored as the corner points of its convex hull, so any
@@ -18,7 +20,7 @@ use std::path::PathBuf;
 use macroquad::math::{vec3, Vec3};
 
 use crate::collision::{Brush, CollisionWorld};
-use crate::map::{Map, Mat, PickupDef, PickupKind, Spawn, Tex};
+use crate::map::{Aabb, Booster, Map, Mat, PickupDef, PickupKind, Push, Spawn, Tex};
 
 pub fn dir() -> PathBuf {
     PathBuf::from("maps")
@@ -94,6 +96,21 @@ pub fn to_text(m: &Map) -> String {
     for p in &m.pickups {
         s += &format!("pickup {} {} {} {}\n", p.kind.key(), p.pos.x, p.pos.y, p.pos.z);
     }
+    for b in &m.boosters {
+        match b.push {
+            Push::Boost { dir, speed, two_way } => {
+                let (a, c) = (b.zone.mins, b.zone.maxs);
+                s += &format!(
+                    "boost {} {} {} {} {} {} {} {} {} {} {}\n",
+                    a.x, a.y, a.z, c.x, c.y, c.z, dir.x, dir.y, dir.z, speed, two_way as u8
+                );
+            }
+            Push::Launch { target, secs } => {
+                let p = b.pad();
+                s += &format!("launch {} {} {} {} {} {} {}\n", p.x, p.y, p.z, target.x, target.y, target.z, secs);
+            }
+        }
+    }
     s
 }
 
@@ -111,6 +128,7 @@ pub fn from_text(text: &str) -> Result<Map, String> {
     let mut brushes = Vec::new();
     let mut spawns: [Vec<Spawn>; 2] = [Vec::new(), Vec::new()];
     let mut pickups = Vec::new();
+    let mut boosters = Vec::new();
     for (ln, line) in text.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -176,6 +194,26 @@ pub fn from_text(text: &str) -> Result<Map, String> {
                 }
                 pickups.push(PickupDef { pos: vec3(v[0], v[1], v[2]), kind });
             }
+            "boost" => {
+                let v = nums(&parts).map_err(err)?;
+                if v.len() != 10 && v.len() != 11 {
+                    return Err(err("boost needs: min xyz, max xyz, dir xyz, speed [two_way]".into()));
+                }
+                let zone = Aabb::new(vec3(v[0], v[1], v[2]), vec3(v[3], v[4], v[5]));
+                let dir = vec3(v[6], v[7], v[8]);
+                if v.get(10).is_some_and(|x| *x != 0.0) {
+                    boosters.push(Booster::two_way(zone, dir, v[9]));
+                } else {
+                    boosters.push(Booster::boost(zone, dir, v[9]));
+                }
+            }
+            "launch" => {
+                let v = nums(&parts).map_err(err)?;
+                if v.len() != 7 {
+                    return Err(err("launch needs: pad xyz, target xyz, seconds".into()));
+                }
+                boosters.push(Booster::launcher(vec3(v[0], v[1], v[2]), vec3(v[3], v[4], v[5]), v[6].max(0.2)));
+            }
             _ => return Err(err(format!("unknown key {key}"))),
         }
     }
@@ -187,6 +225,8 @@ pub fn from_text(text: &str) -> Result<Map, String> {
         kill_z,
         buyzones,
         pickups,
+        boosters,
+        sky: Vec::new(),
         routes: Vec::new(),
         sky_top,
         sky_horizon,

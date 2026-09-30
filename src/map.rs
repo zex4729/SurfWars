@@ -5,7 +5,7 @@
 use macroquad::math::{vec3, Vec3};
 
 use crate::collision::{Brush, CollisionWorld};
-use crate::weapons::WeaponId;
+use crate::weapons::{AttItem, Grip, Muzzle, Sight, Stock, WeaponId};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Team {
@@ -137,6 +137,8 @@ pub struct Route {
 pub enum PickupKind {
     Health,
     Weapon(WeaponId),
+    /// A weapon attachment for the inventory.
+    Attachment(AttItem),
 }
 
 impl PickupKind {
@@ -144,14 +146,25 @@ impl PickupKind {
         match self {
             PickupKind::Health => "health",
             PickupKind::Weapon(w) => w.key(),
+            PickupKind::Attachment(a) => a.key(),
         }
     }
 
     pub fn from_key(k: &str) -> Option<PickupKind> {
         if k == "health" {
             Some(PickupKind::Health)
+        } else if let Some(a) = AttItem::from_key(k) {
+            Some(PickupKind::Attachment(a))
         } else {
             WeaponId::from_key(k).map(PickupKind::Weapon)
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            PickupKind::Health => "Health",
+            PickupKind::Weapon(w) => w.def().name,
+            PickupKind::Attachment(a) => a.name(),
         }
     }
 
@@ -160,6 +173,8 @@ impl PickupKind {
         match self {
             PickupKind::Health => 15.0,
             PickupKind::Weapon(_) => 25.0,
+            PickupKind::Attachment(a) if a.rare() => 60.0,
+            PickupKind::Attachment(_) => 35.0,
         }
     }
 }
@@ -173,6 +188,70 @@ pub struct PickupDef {
 
 pub const PICKUP_HALF: f32 = 20.0;
 
+/// What a booster volume does to a player touching it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Push {
+    /// Accelerates along `dir` (unit) up to `speed` while touched, like a
+    /// `trigger_push` on a surf ramp. A two way booster pushes along `dir`
+    /// or against it, whichever way you are already going.
+    Boost { dir: Vec3, speed: f32, two_way: bool },
+    /// A launch pad: throws the player through `target` in `secs` seconds.
+    Launch { target: Vec3, secs: f32 },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Booster {
+    pub zone: Aabb,
+    pub push: Push,
+}
+
+/// Acceleration of a booster, in units per second squared.
+pub const BOOST_ACCEL: f32 = 2400.0;
+
+impl Booster {
+    pub fn boost(zone: Aabb, dir: Vec3, speed: f32) -> Booster {
+        Booster { zone, push: Push::Boost { dir: dir.normalize(), speed, two_way: false } }
+    }
+
+    pub fn two_way(zone: Aabb, dir: Vec3, speed: f32) -> Booster {
+        Booster { zone, push: Push::Boost { dir: dir.normalize(), speed, two_way: true } }
+    }
+
+    /// A launch pad whose top centre is `pad`.
+    pub fn launcher(pad: Vec3, target: Vec3, secs: f32) -> Booster {
+        Booster {
+            zone: Aabb::new(pad - vec3(56.0, 56.0, 8.0), pad + vec3(56.0, 56.0, 24.0)),
+            push: Push::Launch { target, secs },
+        }
+    }
+
+    /// Top centre of a launch pad (or the zone's bottom centre).
+    pub fn pad(&self) -> Vec3 {
+        let c = (self.zone.mins + self.zone.maxs) * 0.5;
+        vec3(c.x, c.y, self.zone.mins.z + 8.0)
+    }
+
+    /// Launch velocity for a player standing on the pad.
+    pub fn launch_velocity(&self, gravity: f32) -> Option<Vec3> {
+        match self.push {
+            Push::Launch { target, secs } => {
+                // Stretch the flight until the throw goes up enough to leave
+                // the ground (GoldSrc keeps you grounded below 180 up).
+                let start = self.pad() + vec3(0.0, 0.0, 36.0);
+                let mut t = secs.max(0.2);
+                loop {
+                    let v = (target - start) / t + vec3(0.0, 0.0, 0.5 * gravity * t);
+                    if v.z >= 260.0 || t > 6.0 {
+                        return Some(v);
+                    }
+                    t += 0.05;
+                }
+            }
+            Push::Boost { .. } => None,
+        }
+    }
+}
+
 pub struct Map {
     pub name: String,
     pub world: CollisionWorld,
@@ -181,6 +260,9 @@ pub struct Map {
     pub kill_z: f32,
     pub buyzones: [Aabb; 2],
     pub pickups: Vec<PickupDef>,
+    pub boosters: Vec<Booster>,
+    /// Sky ramps of the built-in maps (used by tests to check they work).
+    pub sky: Vec<SkyRamp>,
     pub routes: Vec<Route>,
     pub sky_top: [f32; 3],
     pub sky_horizon: [f32; 3],
@@ -364,6 +446,137 @@ fn perch_line(b: &mut Vec<Brush>, pts: &[(f32, f32)], perch: (f32, f32), top: f3
     b.push(block(perch.0, perch.1, 48.0, top - 200.0, top, mat));
 }
 
+/// A launch pad, a rising boosted surf ramp and the sky platform at its top.
+#[derive(Clone, Copy, Debug)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub struct SkyRamp {
+    pub pad: Vec3,
+    /// +1 when the ramp climbs toward +x, -1 toward -x.
+    pub dir: f32,
+    pub platform: Aabb,
+}
+
+impl Aabb {
+    /// The box rotated 180 degrees about the Z axis when `s` is -1.
+    fn turned(self, s: f32) -> Aabb {
+        let a = vec3(self.mins.x * s, self.mins.y * s, self.mins.z);
+        let b = vec3(self.maxs.x * s, self.maxs.y * s, self.maxs.z);
+        Aabb::new(a.min(b), a.max(b))
+    }
+}
+
+const SKY_RAMP: Mat = Mat::new(Tex::Grid, [240, 110, 200]);
+const SKY_PLATFORM: Mat = Mat::new(Tex::Metal, [250, 215, 120]);
+
+/// Launch pad on the ground.
+fn pad_brush(b: &mut Vec<Brush>, pad: Vec3) {
+    b.push(cuboid(pad - vec3(56.0, 56.0, 8.0), pad + vec3(56.0, 56.0, 2.0), Mat::new(Tex::Metal, [255, 150, 40])));
+}
+
+/// Adds launch pads that throw players from `pads` through `targets`.
+fn add_launchers(b: &mut Vec<Brush>, boosters: &mut Vec<Booster>, list: &[(Vec3, Vec3, f32)]) {
+    for &(pad, target, secs) in list {
+        pad_brush(b, pad);
+        boosters.push(Booster::launcher(pad, target, secs));
+    }
+}
+
+/// Settings for a pair of sky ramps. The T ramp runs along X at `y` from
+/// `x0` to `x1` with its ridge climbing from `z0` to `z1`; the CT ramp is
+/// the same rotated 180 degrees about the map centre. A launch pad at
+/// `pad` throws players onto the start of the ramp, three boosters push
+/// them up it, and the platform at the top holds `items`.
+struct SkyDef {
+    y: f32,
+    x0: f32,
+    x1: f32,
+    z0: f32,
+    z1: f32,
+    pad: Vec3,
+    secs: f32,
+    items: &'static [PickupKind],
+}
+
+fn sky_ramps(
+    b: &mut Vec<Brush>,
+    boosters: &mut Vec<Booster>,
+    pickups: &mut Vec<PickupDef>,
+    sky: &mut Vec<SkyRamp>,
+    d: &SkyDef,
+) {
+    let (hw, h) = (LANE_HALF_WIDTH, LANE_HEIGHT);
+    let ridge = |x: f32| d.z0 + (d.z1 - d.z0) * (x - d.x0) / (d.x1 - d.x0);
+    let sgn = (d.x1 - d.x0).signum();
+    for s in [1.0f32, -1.0] {
+        let r = |p: Vec3| vec3(p.x * s, p.y * s, p.z);
+        let mut local = vec![ramp_x(
+            d.x0.min(d.x1),
+            d.x0.max(d.x1),
+            d.y,
+            ridge(d.x0.min(d.x1)),
+            ridge(d.x0.max(d.x1)),
+            hw,
+            h,
+            SKY_RAMP,
+        )];
+        // The platform starts right where the ramp ends and sits below the
+        // ridge, so anyone flying off the top of the ramp lands on it.
+        let top = d.z1 - h * 0.5;
+        let (px0, px1) = (d.x1, d.x1 + sgn * 1200.0);
+        let plat = Aabb::new(vec3(px0.min(px1), d.y - 420.0, top - 64.0), vec3(px0.max(px1), d.y + 420.0, top));
+        local.push(cuboid(plat.mins, plat.maxs, SKY_PLATFORM));
+        // A tall wall at the far end catches you flying off the ramp, and
+        // low walls on the sides.
+        let (e0, e1) = (px1, px1 + sgn * 48.0);
+        local.push(cuboid(
+            vec3(e0.min(e1), d.y - 468.0, top - 64.0),
+            vec3(e0.max(e1), d.y + 468.0, top + 900.0),
+            SKY_PLATFORM,
+        ));
+        for ys in [-1.0f32, 1.0] {
+            let (a, c) = (d.y + ys * 420.0, d.y + ys * 468.0);
+            local.push(cuboid(
+                vec3(px0.min(px1), a.min(c), top),
+                vec3(px0.max(px1), a.max(c), top + 160.0),
+                SKY_PLATFORM,
+            ));
+        }
+        for br in local {
+            let pts: Vec<Vec3> = br.points.iter().map(|p| r(*p)).collect();
+            b.push(Brush::hull(&pts, br.mat));
+        }
+
+        // Boosters along the ramp.
+        let up = vec3(d.x1 - d.x0, 0.0, d.z1 - d.z0).normalize();
+        for t0 in [0.04f32, 0.34, 0.64] {
+            let t1 = t0 + 0.14;
+            let xa = d.x0 + (d.x1 - d.x0) * t0;
+            let xb = d.x0 + (d.x1 - d.x0) * t1;
+            let (za, zb) = (ridge(xa), ridge(xb));
+            let zone =
+                Aabb::new(vec3(xa.min(xb), d.y - hw, za.min(zb) - h), vec3(xa.max(xb), d.y + hw, za.max(zb) + 48.0));
+            boosters.push(Booster::boost(zone.turned(s), vec3(up.x * s, 0.0, up.z), 2300.0));
+        }
+
+        // Launch pad onto the face nearest to it.
+        let side = (d.pad.y - d.y).signum();
+        let tx = d.x0 + sgn * 500.0;
+        let target = vec3(tx, d.y + side * 280.0, ridge(tx) - 280.0 * h / hw + 80.0);
+        pad_brush(b, r(d.pad));
+        boosters.push(Booster::launcher(r(d.pad), r(target), d.secs));
+
+        for (i, k) in d.items.iter().enumerate() {
+            let x = d.x1 + sgn * (500.0 + 180.0 * i as f32);
+            pickups.push(PickupDef { pos: r(vec3(x, d.y, top + 24.0)), kind: *k });
+        }
+        sky.push(SkyRamp { pad: r(d.pad), dir: sgn * s, platform: plat.turned(s) });
+    }
+}
+
+fn att(a: AttItem, x: f32, y: f32, z: f32) -> PickupDef {
+    PickupDef { pos: vec3(x, y, z), kind: PickupKind::Attachment(a) }
+}
+
 fn wp(x: f32, y: f32, z: f32, mode: WpMode) -> Waypoint {
     Waypoint { pos: vec3(x, y, z), mode }
 }
@@ -451,8 +664,8 @@ fn surf_wars() -> Map {
     let mut b: Vec<Brush> = Vec::new();
 
     // Water at the bottom of the pit (visual only) and a floor below it.
-    b.push(cuboid(vec3(-5200.0, -3000.0, -64.0), vec3(5200.0, 3000.0, 0.0), FLOOR));
-    b.push(cuboid(vec3(-5200.0, -3000.0, 0.0), vec3(5200.0, 3000.0, 120.0), WATER));
+    b.push(cuboid(vec3(-5200.0, -4000.0, -64.0), vec3(5200.0, 4000.0, 0.0), FLOOR));
+    b.push(cuboid(vec3(-5200.0, -4000.0, 0.0), vec3(5200.0, 4000.0, 120.0), WATER));
 
     // Surf lanes.
     for (yc, mat) in [(SW_LANE_Y, RAMP_A), (-SW_LANE_Y, RAMP_B)] {
@@ -566,7 +779,7 @@ fn surf_wars() -> Map {
         perch_line(&mut b, &[(0.0, ys * 640.0), (0.0, ys * 860.0), (0.0, ys * 1075.0)], (0.0, ys * 1300.0), iz, PERCH);
     }
 
-    boundary(&mut b, vec3(5100.0, 2900.0, 0.0), 3600.0);
+    boundary(&mut b, vec3(5100.0, 3950.0, 0.0), 4600.0);
 
     // Spawns.
     let mut spawns: [Vec<Spawn>; 2] = [Vec::new(), Vec::new()];
@@ -584,7 +797,11 @@ fn surf_wars() -> Map {
         Aabb::new(vec3(3450.0, -2200.0, SW_SPAWN_Z - 100.0), vec3(4500.0, 2200.0, SW_SPAWN_Z + 400.0)),
     ];
 
-    let pickups = vec![
+    let mut pickups = vec![
+        att(AttItem::Grip(Grip::Vertical), 0.0, 1300.0, iz + 62.0),
+        att(AttItem::Sight(Sight::RedDot), 0.0, -1300.0, iz + 62.0),
+        att(AttItem::Muzzle(Muzzle::Compensator), -120.0, 1960.0, tz + 62.0),
+        att(AttItem::Stock(Stock::Light), 120.0, -1960.0, tz + 62.0),
         gun(WeaponId::Ak47, 0.0, 1300.0, iz + 24.0),
         gun(WeaponId::Scout, 0.0, -1300.0, iz + 24.0),
         gun(WeaponId::Awp, -120.0, 1960.0, tz + 24.0),
@@ -662,6 +879,49 @@ fn surf_wars() -> Map {
     let mirrored: Vec<Route> = routes.iter().map(mirror_route).collect();
     routes.extend(mirrored);
 
+    // Launch pads at the front of the spawns that throw you onto the lanes.
+    let mut boosters = Vec::new();
+    let mut pads = Vec::new();
+    for ys in [-1.0f32, 1.0] {
+        let tx = -1200.0;
+        let target = vec3(tx, ys * (SW_LANE_Y - 300.0), sw_ridge(tx) - 450.0 + 60.0);
+        pads.push((vec3(-3620.0, ys * 380.0, SW_SPAWN_Z), target, 1.5));
+    }
+    let mirrored: Vec<_> = pads.iter().map(|(p, t, s)| (mirror_point(*p), mirror_point(*t), *s)).collect();
+    pads.extend(mirrored);
+    add_launchers(&mut b, &mut boosters, &pads);
+    // Two way boosters in the lane valleys.
+    for yc in [SW_LANE_Y, -SW_LANE_Y] {
+        let zone = Aabb::new(
+            vec3(-450.0, yc - LANE_HALF_WIDTH, SW_VALLEY_Z - LANE_HEIGHT),
+            vec3(450.0, yc + LANE_HALF_WIDTH, SW_VALLEY_Z + 48.0),
+        );
+        boosters.push(Booster::two_way(zone, Vec3::X, 1700.0));
+    }
+
+    // Sky ramps along the outside, with the rare attachments on top.
+    let mut sky = Vec::new();
+    sky_ramps(
+        &mut b,
+        &mut boosters,
+        &mut pickups,
+        &mut sky,
+        &SkyDef {
+            y: 3350.0,
+            x0: -4000.0,
+            x1: 2400.0,
+            z0: 2200.0,
+            z1: 3700.0,
+            pad: vec3(-4320.0, 1780.0, SW_SPAWN_Z),
+            secs: 1.7,
+            items: &[
+                PickupKind::Attachment(AttItem::Sight(Sight::Acog)),
+                PickupKind::Attachment(AttItem::Muzzle(Muzzle::Suppressor)),
+                PickupKind::Health,
+            ],
+        },
+    );
+
     Map {
         name: "surf_wars".into(),
         world: CollisionWorld::new(b),
@@ -669,6 +929,8 @@ fn surf_wars() -> Map {
         kill_z: 450.0,
         buyzones,
         pickups,
+        boosters,
+        sky,
         routes,
         sky_top: [0.20, 0.38, 0.72],
         sky_horizon: [0.78, 0.86, 0.95],
@@ -715,8 +977,8 @@ fn sc_pillars(ys: f32) -> Vec<(f32, f32, f32)> {
 
 fn surf_canyon() -> Map {
     let mut b: Vec<Brush> = Vec::new();
-    b.push(cuboid(vec3(-5600.0, -3400.0, -64.0), vec3(5600.0, 3400.0, 0.0), FLOOR));
-    b.push(cuboid(vec3(-5600.0, -3400.0, 0.0), vec3(5600.0, 3400.0, 120.0), WATER));
+    b.push(cuboid(vec3(-5600.0, -4600.0, -64.0), vec3(5600.0, 4600.0, 0.0), FLOOR));
+    b.push(cuboid(vec3(-5600.0, -4600.0, 0.0), vec3(5600.0, 4600.0, 120.0), WATER));
 
     // Three parallel lanes: a central wide one and two narrower outside.
     let lanes: [(f32, f32, f32, Mat); 3] =
@@ -783,7 +1045,7 @@ fn surf_canyon() -> Map {
         perch_line(&mut b, &[(0.0, ys * 520.0), (0.0, ys * 330.0)], (0.0, 0.0), pz, PERCH);
     }
 
-    boundary(&mut b, vec3(5700.0, 3300.0, 0.0), 3800.0);
+    boundary(&mut b, vec3(5700.0, 4500.0, 0.0), 4800.0);
 
     let mut spawns: [Vec<Spawn>; 2] = [Vec::new(), Vec::new()];
     for (ti, s) in [(0usize, -1.0f32), (1, 1.0)] {
@@ -798,7 +1060,10 @@ fn surf_canyon() -> Map {
         Aabb::new(vec3(-5500.0, -2400.0, SC_SPAWN_Z - 100.0), vec3(-4450.0, 2400.0, SC_SPAWN_Z + 400.0)),
         Aabb::new(vec3(4450.0, -2400.0, SC_SPAWN_Z - 100.0), vec3(5500.0, 2400.0, SC_SPAWN_Z + 400.0)),
     ];
-    let pickups = vec![
+    let mut pickups = vec![
+        att(AttItem::Sight(Sight::RedDot), 0.0, 0.0, pz + 62.0),
+        att(AttItem::Grip(Grip::Angled), -420.0, 1020.0, pz + 62.0),
+        att(AttItem::Muzzle(Muzzle::LongBarrel), 420.0, -1020.0, pz + 62.0),
         gun(WeaponId::Awp, 0.0, 0.0, pz + 24.0),
         gun(WeaponId::Ak47, -420.0, 1020.0, pz + 24.0),
         gun(WeaponId::Ak47, 420.0, -1020.0, pz + 24.0),
@@ -862,6 +1127,45 @@ fn surf_canyon() -> Map {
     let mirrored: Vec<Route> = routes.iter().map(mirror_route).collect();
     routes.extend(mirrored);
 
+    let mut boosters = Vec::new();
+    let mut pads = Vec::new();
+    for ys in [-1.0f32, 1.0] {
+        let tx = -2000.0;
+        let target = vec3(tx, ys * (1750.0 - 300.0), sc_main_ridge(tx) - 150.0 - 450.0 + 60.0);
+        pads.push((vec3(-4620.0, ys * 1150.0, SC_SPAWN_Z), target, 1.4));
+    }
+    let mirrored: Vec<_> = pads.iter().map(|(p, t, s)| (mirror_point(*p), mirror_point(*t), *s)).collect();
+    pads.extend(mirrored);
+    add_launchers(&mut b, &mut boosters, &pads);
+    // Two way booster in the middle of the centre lane.
+    boosters.push(Booster::two_way(
+        Aabb::new(vec3(-700.0, -620.0, 1500.0 - 930.0), vec3(700.0, 620.0, 1548.0)),
+        Vec3::X,
+        1700.0,
+    ));
+
+    let mut sky = Vec::new();
+    sky_ramps(
+        &mut b,
+        &mut boosters,
+        &mut pickups,
+        &mut sky,
+        &SkyDef {
+            y: 3500.0,
+            x0: -5000.0,
+            x1: 2600.0,
+            z0: 2350.0,
+            z1: 3950.0,
+            pad: vec3(-5000.0, 2180.0, SC_SPAWN_Z),
+            secs: 1.7,
+            items: &[
+                PickupKind::Attachment(AttItem::Sight(Sight::Holo)),
+                PickupKind::Attachment(AttItem::Sight(Sight::Acog)),
+                PickupKind::Health,
+            ],
+        },
+    );
+
     Map {
         name: "surf_canyon".into(),
         world: CollisionWorld::new(b),
@@ -869,6 +1173,8 @@ fn surf_canyon() -> Map {
         kill_z: 450.0,
         buyzones,
         pickups,
+        boosters,
+        sky,
         routes,
         sky_top: [0.55, 0.30, 0.35],
         sky_horizon: [0.98, 0.72, 0.50],
@@ -952,8 +1258,8 @@ fn turn_route(
 
 fn surf_hairpin() -> Map {
     let mut b: Vec<Brush> = Vec::new();
-    b.push(cuboid(vec3(-9800.0, -4200.0, -64.0), vec3(9800.0, 4200.0, 0.0), FLOOR));
-    b.push(cuboid(vec3(-9800.0, -4200.0, 0.0), vec3(9800.0, 4200.0, 120.0), WATER));
+    b.push(cuboid(vec3(-9800.0, -5600.0, -64.0), vec3(9800.0, 5600.0, 0.0), FLOOR));
+    b.push(cuboid(vec3(-9800.0, -5600.0, 0.0), vec3(9800.0, 5600.0, 120.0), WATER));
 
     // Geometry of the T track; the CT track is the same rotated by 180.
     // leg0: south along x=-8500 from y=200 to -1500
@@ -990,7 +1296,8 @@ fn surf_hairpin() -> Map {
         local.push(cuboid(vec3(-9300.0, 300.0, sz - 64.0), vec3(-8988.0, 1500.0, sz), team_mat));
         local.push(cuboid(vec3(-8988.0, 300.0, sz - 64.0), vec3(-8012.0, 1500.0, sz), tint(team_mat, m0)));
         local.push(cuboid(vec3(-8012.0, 300.0, sz - 64.0), vec3(-7700.0, 1500.0, sz), team_mat));
-        local.push(cuboid(vec3(-9300.0, 1500.0, sz - 64.0), vec3(-7700.0, 1564.0, sz + 300.0), trim));
+        // back wall, with a gap at the west end for the sky ramp launch pad
+        local.push(cuboid(vec3(-8950.0, 1500.0, sz - 64.0), vec3(-7700.0, 1564.0, sz + 300.0), trim));
         local.push(cuboid(vec3(-8700.0, 1200.0, 0.0), vec3(-8300.0, 1500.0, sz - 64.0), CONCRETE));
         local.push(block(-9100.0, 1300.0, 32.0, sz, sz + 64.0, CRATE));
         local.push(block(-7900.0, 1300.0, 32.0, sz, sz + 64.0, CRATE));
@@ -1022,7 +1329,7 @@ fn surf_hairpin() -> Map {
         b.push(block(x, y, h, fz, fz + h * 2.0, CRATE));
     }
 
-    boundary(&mut b, vec3(9700.0, 4100.0, 0.0), 5200.0);
+    boundary(&mut b, vec3(9700.0, 5500.0, 0.0), 6600.0);
 
     let mut spawns: [Vec<Spawn>; 2] = [Vec::new(), Vec::new()];
     for (ti, s) in [(0usize, 1.0f32), (1, -1.0)] {
@@ -1040,9 +1347,15 @@ fn surf_hairpin() -> Map {
         Aabb::new(vec3(7600.0, -1600.0, HP_SPAWN_Z - 100.0), vec3(9400.0, -250.0, HP_SPAWN_Z + 400.0)),
     ];
 
-    let mut pickups =
-        vec![gun(WeaponId::Awp, 0.0, 0.0, fz + 24.0), health(-450.0, 0.0, fz + 24.0), health(450.0, 0.0, fz + 24.0)];
+    let mut pickups = vec![
+        att(AttItem::Sight(Sight::RedDot), 0.0, 0.0, fz + 62.0),
+        gun(WeaponId::Awp, 0.0, 0.0, fz + 24.0),
+        health(-450.0, 0.0, fz + 24.0),
+        health(450.0, 0.0, fz + 24.0),
+    ];
     for s in [1.0f32, -1.0] {
+        let a = if s > 0.0 { AttItem::Stock(Stock::Heavy) } else { AttItem::Grip(Grip::Stubby) };
+        pickups.push(att(a, (turn_b.x - 150.0) * s, turn_b.y * s, 3142.0));
         pickups.push(gun(WeaponId::Ak47, (turn_b.x - 150.0) * s, turn_b.y * s, 3104.0));
         pickups.push(health(-4200.0 * s, 0.0, fz + 24.0));
         // floating in the surf line along the straights
@@ -1089,6 +1402,43 @@ fn surf_hairpin() -> Map {
     let rotated: Vec<Route> = routes.iter().map(rotate_route).collect();
     routes.extend(rotated);
 
+    // Launch pad from the spawn onto the far face of the first ramp.
+    let mut boosters = Vec::new();
+    let t = (-400.0 + 1500.0) / 1700.0;
+    let target = vec3(-8500.0 - 280.0, -400.0, lerp(z_leg0, 1.0 - t) - 420.0 + 60.0);
+    let pad = vec3(-9150.0, 480.0, HP_SPAWN_Z);
+    let rot = |p: Vec3| vec3(-p.x, -p.y, p.z);
+    add_launchers(&mut b, &mut boosters, &[(pad, target, 1.3), (rot(pad), rot(target), 1.3)]);
+    // Boosters on the long straights, pushing the way each track runs.
+    for s in [1.0f32, -1.0] {
+        let leg1 = Aabb::new(vec3(-2600.0, -3000.0 - HP_HW, 3350.0 - HP_H), vec3(-1300.0, -3000.0 + HP_HW, 3450.0));
+        boosters.push(Booster::boost(leg1.turned(s), vec3(s, 0.0, 0.0), 1900.0));
+        let leg2 = Aabb::new(vec3(-1200.0, -1100.0 - HP_HW, 2750.0 - HP_H), vec3(200.0, -1100.0 + HP_HW, 2800.0));
+        boosters.push(Booster::boost(leg2.turned(s), vec3(-s, 0.0, 0.0), 1900.0));
+    }
+
+    let mut sky = Vec::new();
+    sky_ramps(
+        &mut b,
+        &mut boosters,
+        &mut pickups,
+        &mut sky,
+        &SkyDef {
+            y: 4700.0,
+            x0: -9200.0,
+            x1: -1400.0,
+            z0: 4000.0,
+            z1: 5700.0,
+            pad: vec3(-9125.0, 1400.0, HP_SPAWN_Z),
+            secs: 2.2,
+            items: &[
+                PickupKind::Attachment(AttItem::Muzzle(Muzzle::Suppressor)),
+                PickupKind::Attachment(AttItem::Sight(Sight::Holo)),
+                PickupKind::Health,
+            ],
+        },
+    );
+
     Map {
         name: "surf_hairpin".into(),
         world: CollisionWorld::new(b),
@@ -1096,6 +1446,8 @@ fn surf_hairpin() -> Map {
         kill_z: 450.0,
         buyzones,
         pickups,
+        boosters,
+        sky,
         routes,
         sky_top: [0.12, 0.22, 0.45],
         sky_horizon: [0.62, 0.72, 0.88],

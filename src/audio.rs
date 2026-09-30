@@ -40,9 +40,15 @@ pub enum Sfx {
     Explosion,
     Silenced,
     HealthPickup,
+    Launch,
+    Boost,
+    AttachPickup,
 }
 
-const ALL: [Sfx; 29] = [
+const ALL: [Sfx; 32] = [
+    Sfx::Launch,
+    Sfx::Boost,
+    Sfx::AttachPickup,
     Sfx::Laser,
     Sfx::RocketFire,
     Sfx::Explosion,
@@ -420,6 +426,51 @@ fn synth(sfx: Sfx) -> Vec<f32> {
             normalize(&mut out, 0.35);
             out
         }
+        Sfx::Launch => {
+            // a springy thump sweeping up
+            let mut out = buf(0.7);
+            let n = out.len();
+            let mut phase = 0.0f32;
+            let mut lp = Lp::new(1800.0);
+            for (i, s) in out.iter_mut().enumerate() {
+                let k = i as f32 / n as f32;
+                let t = i as f32 / RATE as f32;
+                phase += (90.0 + 700.0 * k) / RATE as f32 * std::f32::consts::TAU;
+                let body = phase.sin() * (-t / 0.25).exp();
+                let air = lp.run(rng.range(-1.0, 1.0)) * (k * std::f32::consts::PI).sin() * 0.5;
+                *s = body + air;
+            }
+            normalize(&mut out, 0.45);
+            out
+        }
+        Sfx::Boost => {
+            let mut out = buf(0.5);
+            let n = out.len();
+            let mut phase = 0.0f32;
+            for (i, s) in out.iter_mut().enumerate() {
+                let k = i as f32 / n as f32;
+                phase += (400.0 + 900.0 * k) / RATE as f32 * std::f32::consts::TAU;
+                *s = (phase.sin() + (phase * 1.5).sin() * 0.4) * (k * std::f32::consts::PI).sin();
+            }
+            normalize(&mut out, 0.25);
+            out
+        }
+        Sfx::AttachPickup => {
+            let mut out = buf(0.5);
+            for (at, f) in [(0.0, 880.0), (0.08, 1175.0), (0.16, 1760.0)] {
+                let start = (at * RATE as f32) as usize;
+                for i in 0..(0.25 * RATE as f32) as usize {
+                    if start + i >= out.len() {
+                        break;
+                    }
+                    let t = i as f32 / RATE as f32;
+                    out[start + i] += (t * f * std::f32::consts::TAU).sin() * (-t / 0.08).exp();
+                }
+            }
+            click(&mut out, 0.0, 2500.0, 0.3, &mut rng);
+            normalize(&mut out, 0.35);
+            out
+        }
         Sfx::HealthPickup => {
             let mut out = buf(0.45);
             for (at, f) in [(0.0, 660.0), (0.12, 990.0)] {
@@ -579,6 +630,20 @@ impl Audio {
                 Event::PickupTaken { player, health, .. } => {
                     if Some(*player) == local {
                         self.play(if *health { Sfx::HealthPickup } else { Sfx::Pickup }, 0.8);
+                    }
+                }
+                Event::AttachmentTaken { player, .. } => {
+                    if Some(*player) == local {
+                        self.play(Sfx::AttachPickup, 0.8);
+                    }
+                }
+                Event::Launch { player, pos } => {
+                    let v = if Some(*player) == local { 0.8 } else { self.at(listener, *pos, 0.7, 2500.0) };
+                    self.play(Sfx::Launch, v);
+                }
+                Event::Boost { player } => {
+                    if Some(*player) == local {
+                        self.play(Sfx::Boost, 0.6);
                     }
                 }
                 Event::KnifeSwing { player, hit } => {

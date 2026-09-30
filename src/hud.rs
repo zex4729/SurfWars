@@ -48,7 +48,6 @@ pub struct HudState<'a> {
     pub spectating: bool,
     pub show_scores: bool,
     pub buy_menu: bool,
-    pub buy_page: u8,
     pub view_angles: Vec3,
     pub third_person: bool,
     pub fps: i32,
@@ -64,8 +63,12 @@ pub fn draw(h: &HudState) {
 
     if let Some(p) = pov {
         if p.alive {
-            if p.zoom > 0 && !h.third_person {
+            let scoped = p.weapon().is_some_and(|w| w.scope_view(p.zoom));
+            let ads = p.weapon().filter(|w| w.ads_view(p.zoom));
+            if scoped && !h.third_person {
                 draw_scope(sw, sh);
+            } else if let Some(w) = ads.filter(|_| !h.third_person) {
+                draw_reticle(w.att.sight, sw, sh, s);
             } else if !h.third_person {
                 draw_crosshair(p, sw, sh, s);
             }
@@ -115,13 +118,20 @@ pub fn draw(h: &HudState) {
     }
 
     if h.buy_menu {
-        if h.buy_page == 1 {
-            draw_attachment_menu(g, h.pov, sw, sh, s);
-        } else {
-            draw_buy_menu(g, h.pov, sw, sh, s);
-        }
+        draw_buy_menu(g, h.pov, sw, sh, s);
     }
     if let Some(i) = h.pov.filter(|i| Some(*i) == g.local && g.players[*i].alive) {
+        if let Some((item, t)) = g.players[i].last_item.filter(|(_, t)| g.time - t < 3.5) {
+            let _ = t;
+            let c = item.color();
+            text_centered(
+                &format!("Picked up {}{}  -  I: inventory", item.name(), if item.rare() { " (rare)" } else { "" }),
+                sw * 0.5,
+                sh * 0.68,
+                20.0 * s,
+                Color::from_rgba(c[0], c[1], c[2], 255),
+            );
+        }
         if let Some(id) = g.pickup_near(i) {
             text_centered(
                 &format!("Press E to swap for the {}", id.def().name),
@@ -221,6 +231,26 @@ fn draw_crosshair(p: &Player, sw: f32, sh: f32, s: f32) {
     draw_rectangle(cx + gap, cy - th * 0.5, len, th, CROSS_COLOR);
     draw_rectangle(cx - th * 0.5, cy - gap - len, th, len, CROSS_COLOR);
     draw_rectangle(cx - th * 0.5, cy + gap, th, len, CROSS_COLOR);
+}
+
+/// The reflex reticle projected in a red dot or holographic sight.
+fn draw_reticle(sight: crate::weapons::Sight, sw: f32, sh: f32, s: f32) {
+    let cx = (sw * 0.5).floor();
+    let cy = (sh * 0.5).floor();
+    match sight {
+        crate::weapons::Sight::Holo => {
+            let c = Color::new(0.35, 1.0, 0.45, 0.9);
+            draw_circle_lines(cx, cy, 16.0 * s, 1.6 * s, c);
+            draw_circle(cx, cy, 1.8 * s, c);
+            for (dx, dy) in [(1.0f32, 0.0f32), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
+                draw_line(cx + dx * 16.0 * s, cy + dy * 16.0 * s, cx + dx * 22.0 * s, cy + dy * 22.0 * s, 1.6 * s, c);
+            }
+        }
+        _ => {
+            draw_circle(cx, cy, 4.5 * s, Color::new(1.0, 0.1, 0.1, 0.25));
+            draw_circle(cx, cy, 2.2 * s, Color::new(1.0, 0.15, 0.1, 0.95));
+        }
+    }
 }
 
 fn draw_scope(sw: f32, sh: f32) {
@@ -422,7 +452,7 @@ fn draw_buy_menu(g: &Game, pov: Option<usize>, _sw: f32, sh: f32, s: f32) {
     let y = sh * 0.3;
     let w = 330.0 * s;
     let line = 30.0 * s;
-    let h = line * (ALL_BUYABLE.len() as f32 + 4.4);
+    let h = line * (ALL_BUYABLE.len() as f32 + 4.0);
     panel(x, y, w, h);
     text_shadow("Buy weapon (free)", x + 14.0 * s, y + 30.0 * s, 24.0 * s, HUD_COLOR);
     let can_buy = pov.is_some_and(|i| g.in_buyzone(i));
@@ -440,56 +470,10 @@ fn draw_buy_menu(g: &Game, pov: Option<usize>, _sw: f32, sh: f32, s: f32) {
         text(&info, x + w - 80.0 * s, y + 30.0 * s + line * (i as f32 + 1.2), 16.0 * s, GRAY);
     }
     let n = ALL_BUYABLE.len() as f32;
-    text_shadow(
-        "4. Attachments for the gun in hand",
-        x + 20.0 * s,
-        y + 30.0 * s + line * (n + 1.4),
-        20.0 * s,
-        if can_buy { WHITE } else { GRAY },
-    );
-    text("AK, AWP, Scout: find them on the map", x + 20.0 * s, y + 30.0 * s + line * (n + 2.2), 15.0 * s, GRAY);
+    text("AK, AWP, Scout: find them on the map", x + 20.0 * s, y + 30.0 * s + line * (n + 1.2), 15.0 * s, GRAY);
+    text("Attachments: pick them up, fit them with I", x + 20.0 * s, y + 30.0 * s + line * (n + 1.8), 15.0 * s, GRAY);
     let hint = if can_buy { "0. Close" } else { "You are not in a buy zone" };
     text_shadow(hint, x + 20.0 * s, y + h - 14.0 * s, 18.0 * s, if can_buy { WHITE } else { RED });
-}
-
-fn draw_attachment_menu(g: &Game, pov: Option<usize>, _sw: f32, sh: f32, s: f32) {
-    let x = 30.0 * s;
-    let y = sh * 0.26;
-    let w = 560.0 * s;
-    let line = 44.0 * s;
-    let h = line * 7.2;
-    panel(x, y, w, h);
-    let Some(p) = pov.map(|i| &g.players[i]) else { return };
-    let Some(wp) = p.weapon() else {
-        text_shadow("Take out a gun to customize it", x + 14.0 * s, y + 30.0 * s, 22.0 * s, HUD_COLOR);
-        return;
-    };
-    let can = pov.is_some_and(|i| g.in_buyzone(i));
-    text_shadow(&format!("Attachments: {}", wp.def().name), x + 14.0 * s, y + 30.0 * s, 24.0 * s, HUD_COLOR);
-    let a = wp.att;
-    let rows: [(&str, &str, &str); 4] = [
-        ("Sight", a.sight.name(), a.sight.desc()),
-        ("Muzzle", a.muzzle.name(), a.muzzle.desc()),
-        ("Stock", a.stock.name(), a.stock.desc()),
-        ("Grip", a.grip.name(), a.grip.desc()),
-    ];
-    for (i, (cat, name, desc)) in rows.iter().enumerate() {
-        let yy = y + 30.0 * s + line * (i as f32 + 1.0);
-        text_shadow(&format!("{}. {cat}: {name}", i + 1), x + 20.0 * s, yy, 21.0 * s, if can { WHITE } else { GRAY });
-        text(desc, x + 44.0 * s, yy + 18.0 * s, 15.0 * s, Color::new(0.75, 0.75, 0.75, 1.0));
-    }
-    let m = wp.mods();
-    let stats = format!(
-        "damage x{:.2}  recoil x{:.2}  spread x{:.2}  speed {:+.0}{}",
-        m.damage,
-        m.recoil,
-        m.spread,
-        m.speed,
-        if m.silenced { "  silenced" } else { "" }
-    );
-    text(&stats, x + 20.0 * s, y + 30.0 * s + line * 5.1, 16.0 * s, HUD_COLOR);
-    let hint = if can { "1-4 next option (SHIFT: previous)    0. Back" } else { "You are not in a buy zone" };
-    text_shadow(hint, x + 20.0 * s, y + h - 14.0 * s, 17.0 * s, if can { WHITE } else { RED });
 }
 
 fn draw_scoreboard(g: &Game, sw: f32, sh: f32, s: f32) {

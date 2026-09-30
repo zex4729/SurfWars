@@ -233,8 +233,8 @@ impl Sight {
     pub fn desc(self) -> &'static str {
         match self {
             Sight::Iron => "no zoom",
-            Sight::RedDot => "MOUSE2 zoom, -15% spread aimed",
-            Sight::Holo => "MOUSE2 zoom, -20% spread aimed, slower draw",
+            Sight::RedDot => "MOUSE2 aim down sights, -15% spread aimed",
+            Sight::Holo => "MOUSE2 aim down sights, -20% spread aimed, slower draw",
             Sight::Acog => "4x zoom, -40% spread aimed, slow while aimed",
         }
     }
@@ -298,9 +298,96 @@ impl Grip {
     }
 }
 
-fn cycle<T: Copy + PartialEq>(all: &[T], cur: T, dir: i32) -> T {
-    let i = all.iter().position(|x| *x == cur).unwrap_or(0) as i32;
-    all[(i + dir).rem_euclid(all.len() as i32) as usize]
+pub const ATT_CATEGORIES: [&str; 4] = ["Sights", "Muzzles", "Stocks", "Grips"];
+
+/// One attachment you can carry in the inventory. The defaults (iron
+/// sights, no muzzle, standard stock, no grip) are not items: every gun
+/// always has them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum AttItem {
+    Sight(Sight),
+    Muzzle(Muzzle),
+    Stock(Stock),
+    Grip(Grip),
+}
+
+impl AttItem {
+    pub const ALL: [AttItem; 11] = [
+        AttItem::Sight(Sight::RedDot),
+        AttItem::Sight(Sight::Holo),
+        AttItem::Sight(Sight::Acog),
+        AttItem::Muzzle(Muzzle::Suppressor),
+        AttItem::Muzzle(Muzzle::Compensator),
+        AttItem::Muzzle(Muzzle::LongBarrel),
+        AttItem::Stock(Stock::Light),
+        AttItem::Stock(Stock::Heavy),
+        AttItem::Grip(Grip::Vertical),
+        AttItem::Grip(Grip::Angled),
+        AttItem::Grip(Grip::Stubby),
+    ];
+
+    /// 0 sight, 1 muzzle, 2 stock, 3 grip.
+    pub fn category(self) -> usize {
+        match self {
+            AttItem::Sight(_) => 0,
+            AttItem::Muzzle(_) => 1,
+            AttItem::Stock(_) => 2,
+            AttItem::Grip(_) => 3,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            AttItem::Sight(x) => x.name(),
+            AttItem::Muzzle(x) => x.name(),
+            AttItem::Stock(x) => x.name(),
+            AttItem::Grip(x) => x.name(),
+        }
+    }
+
+    pub fn desc(self) -> &'static str {
+        match self {
+            AttItem::Sight(x) => x.desc(),
+            AttItem::Muzzle(x) => x.desc(),
+            AttItem::Stock(x) => x.desc(),
+            AttItem::Grip(x) => x.desc(),
+        }
+    }
+
+    pub fn key(self) -> &'static str {
+        match self {
+            AttItem::Sight(Sight::RedDot) => "reddot",
+            AttItem::Sight(Sight::Holo) => "holo",
+            AttItem::Sight(_) => "acog",
+            AttItem::Muzzle(Muzzle::Suppressor) => "suppressor",
+            AttItem::Muzzle(Muzzle::Compensator) => "compensator",
+            AttItem::Muzzle(_) => "longbarrel",
+            AttItem::Stock(Stock::Light) => "lightstock",
+            AttItem::Stock(_) => "heavystock",
+            AttItem::Grip(Grip::Vertical) => "vgrip",
+            AttItem::Grip(Grip::Angled) => "agrip",
+            AttItem::Grip(_) => "sgrip",
+        }
+    }
+
+    pub fn from_key(k: &str) -> Option<AttItem> {
+        AttItem::ALL.iter().copied().find(|a| a.key() == k)
+    }
+
+    /// Rare items only show up on the sky platforms.
+    pub fn rare(self) -> bool {
+        matches!(self, AttItem::Sight(Sight::Acog | Sight::Holo) | AttItem::Muzzle(Muzzle::Suppressor))
+    }
+
+    /// Colour used for the pickup and inventory icons.
+    pub fn color(self) -> [u8; 3] {
+        match self.category() {
+            0 => [255, 90, 80],
+            1 => [110, 200, 255],
+            2 => [255, 200, 90],
+            _ => [140, 255, 140],
+        }
+    }
 }
 
 impl Attachments {
@@ -313,14 +400,36 @@ impl Attachments {
         }
     }
 
-    /// Cycles category `cat` (0 sight, 1 muzzle, 2 stock, 3 grip).
-    pub fn cycle(&mut self, cat: usize, dir: i32) {
+    /// The item mounted in category `cat`, or None for the default part.
+    pub fn get(&self, cat: usize) -> Option<AttItem> {
         match cat {
-            0 => self.sight = cycle(&Sight::ALL, self.sight, dir),
-            1 => self.muzzle = cycle(&Muzzle::ALL, self.muzzle, dir),
-            2 => self.stock = cycle(&Stock::ALL, self.stock, dir),
-            _ => self.grip = cycle(&Grip::ALL, self.grip, dir),
+            0 => (self.sight != Sight::Iron).then_some(AttItem::Sight(self.sight)),
+            1 => (self.muzzle != Muzzle::None).then_some(AttItem::Muzzle(self.muzzle)),
+            2 => (self.stock != Stock::Standard).then_some(AttItem::Stock(self.stock)),
+            _ => (self.grip != Grip::None).then_some(AttItem::Grip(self.grip)),
         }
+    }
+
+    /// Mounts `item` in category `cat` (None puts the default part back)
+    /// and returns what was there before.
+    pub fn set(&mut self, cat: usize, item: Option<AttItem>) -> Option<AttItem> {
+        let old = self.get(cat);
+        match (cat, item) {
+            (_, Some(AttItem::Sight(x))) => self.sight = x,
+            (_, Some(AttItem::Muzzle(x))) => self.muzzle = x,
+            (_, Some(AttItem::Stock(x))) => self.stock = x,
+            (_, Some(AttItem::Grip(x))) => self.grip = x,
+            (0, None) => self.sight = Sight::Iron,
+            (1, None) => self.muzzle = Muzzle::None,
+            (2, None) => self.stock = Stock::Standard,
+            (_, None) => self.grip = Grip::None,
+        }
+        old
+    }
+
+    /// All non-default parts.
+    pub fn items(&self) -> Vec<AttItem> {
+        (0..4).filter_map(|c| self.get(c)).collect()
     }
 
     pub fn mods(&self) -> Mods {
@@ -328,11 +437,11 @@ impl Attachments {
         match self.sight {
             Sight::Iron => {}
             Sight::RedDot => {
-                m.zoom = Some(75.0);
+                m.zoom = Some(80.0);
                 m.ads_spread = 0.85;
             }
             Sight::Holo => {
-                m.zoom = Some(65.0);
+                m.zoom = Some(72.0);
                 m.ads_spread = 0.8;
                 m.deploy *= 1.1;
             }
@@ -588,9 +697,21 @@ impl Weapon {
         }
     }
 
-    /// True for sight zoom (aim down sights) as opposed to a sniper scope.
+    /// True when aiming through an attachment sight (the ACOG as well):
+    /// the sight's spread and speed modifiers apply.
     pub fn is_ads(&self, level: u8) -> bool {
         level > 0 && self.def().zoom_fov.is_empty()
+    }
+
+    /// True when the view shows a scope overlay: sniper scopes and the ACOG.
+    /// Red dot and holographic sights aim down the sight instead.
+    pub fn scope_view(&self, level: u8) -> bool {
+        level > 0 && (!self.def().zoom_fov.is_empty() || self.att.sight == Sight::Acog)
+    }
+
+    /// Aiming down an open sight: the gun moves to the centre of the view.
+    pub fn ads_view(&self, level: u8) -> bool {
+        level > 0 && !self.scope_view(level)
     }
 
     fn initial_accuracy(id: WeaponId) -> f32 {

@@ -5,7 +5,7 @@
 use macroquad::math::{vec3, Vec3};
 
 use crate::bot::{self, BotBrain, Difficulty};
-use crate::map::{Map, PickupDef, PickupKind, Team, PICKUP_HALF};
+use crate::map::{Map, PickupDef, PickupKind, Push, Team, BOOST_ACCEL, PICKUP_HALF};
 use crate::pmove::*;
 use crate::util::{horizontal, Rng};
 use crate::weapons::*;
@@ -71,26 +71,95 @@ impl Default for Settings {
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
 pub enum Event {
-    Shot { player: usize, weapon: WeaponId, pos: Vec3, silenced: bool },
-    Laser { start: Vec3, end: Vec3, team: Team },
-    Explosion { pos: Vec3 },
-    PickupTaken { player: usize, pos: Vec3, health: bool },
-    Tracer { start: Vec3, end: Vec3 },
-    Impact { pos: Vec3, normal: Vec3 },
-    Hit { victim: usize, attacker: usize, pos: Vec3, headshot: bool },
-    Kill { victim: usize, attacker: Option<usize>, weapon: Option<WeaponId>, headshot: bool },
-    Jump { player: usize },
-    Land { player: usize, speed: f32 },
-    Footstep { player: usize },
-    Reload { player: usize },
-    DryFire { player: usize },
-    Zoom { player: usize },
-    Deploy { player: usize },
-    KnifeSwing { player: usize, hit: bool },
-    Teleport { player: usize },
-    Pickup { player: usize },
+    Shot {
+        player: usize,
+        weapon: WeaponId,
+        pos: Vec3,
+        silenced: bool,
+    },
+    Laser {
+        start: Vec3,
+        end: Vec3,
+        team: Team,
+    },
+    Explosion {
+        pos: Vec3,
+    },
+    PickupTaken {
+        player: usize,
+        pos: Vec3,
+        health: bool,
+    },
+    Tracer {
+        start: Vec3,
+        end: Vec3,
+    },
+    Impact {
+        pos: Vec3,
+        normal: Vec3,
+    },
+    Hit {
+        victim: usize,
+        attacker: usize,
+        pos: Vec3,
+        headshot: bool,
+    },
+    Kill {
+        victim: usize,
+        attacker: Option<usize>,
+        weapon: Option<WeaponId>,
+        headshot: bool,
+    },
+    Jump {
+        player: usize,
+    },
+    Land {
+        player: usize,
+        speed: f32,
+    },
+    Footstep {
+        player: usize,
+    },
+    Reload {
+        player: usize,
+    },
+    DryFire {
+        player: usize,
+    },
+    Zoom {
+        player: usize,
+    },
+    Deploy {
+        player: usize,
+    },
+    KnifeSwing {
+        player: usize,
+        hit: bool,
+    },
+    Teleport {
+        player: usize,
+    },
+    /// Thrown by a launch pad.
+    Launch {
+        player: usize,
+        pos: Vec3,
+    },
+    /// Entered a booster.
+    Boost {
+        player: usize,
+    },
+    /// Picked up an attachment for the inventory.
+    AttachmentTaken {
+        player: usize,
+        item: AttItem,
+    },
+    Pickup {
+        player: usize,
+    },
     RoundStart,
-    RoundEnd { winner: Option<Team> },
+    RoundEnd {
+        winner: Option<Team>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -162,6 +231,13 @@ pub struct Player {
     pub last_buy: Option<WeaponId>,
     /// Attachments picked in the buy menu for each weapon type.
     pub loadout: Vec<(WeaponId, Attachments)>,
+    /// Attachments carried but not mounted on a gun.
+    pub inventory: Vec<AttItem>,
+    /// Launch pads ignore the player until then.
+    pub launch_ready: f64,
+    pub in_boost: bool,
+    /// Last attachment picked up and when, for the HUD.
+    pub last_item: Option<(AttItem, f64)>,
     /// Visual only: fades the hover board in and out.
     pub board: f32,
     pub board_normal: Vec3,
@@ -202,6 +278,10 @@ impl Player {
             spawn_count: 0,
             last_buy: None,
             loadout: Vec::new(),
+            inventory: Vec::new(),
+            launch_ready: 0.0,
+            in_boost: false,
+            last_item: None,
             board: 0.0,
             board_normal: Vec3::Z,
         }
@@ -257,6 +337,55 @@ impl Player {
     /// The attachments this player wants on `id`.
     pub fn attachments_for(&self, id: WeaponId) -> Attachments {
         self.loadout.iter().find(|(w, _)| *w == id).map(|(_, a)| *a).unwrap_or_default()
+    }
+
+    fn slot_weapon_mut(&mut self, slot: Slot) -> Option<&mut Weapon> {
+        match slot {
+            Slot::Primary => self.primary.as_mut(),
+            Slot::Secondary => self.secondary.as_mut(),
+            Slot::Melee => None,
+        }
+    }
+
+    pub fn slot_weapon(&self, slot: Slot) -> Option<&Weapon> {
+        match slot {
+            Slot::Primary => self.primary.as_ref(),
+            Slot::Secondary => self.secondary.as_ref(),
+            Slot::Melee => None,
+        }
+    }
+
+    /// A human's gun leaving their hands: its attachments go back into the
+    /// inventory. Bots keep theirs on the gun (loot).
+    fn strip_slot(&mut self, slot: Slot) {
+        if self.is_bot() {
+            return;
+        }
+        if let Some(w) = self.slot_weapon_mut(slot) {
+            let items = w.att.items();
+            w.att = Attachments::default();
+            self.inventory.extend(items);
+        }
+    }
+
+    /// Mounts the parts last chosen for this gun type that are in the
+    /// inventory onto the gun in `slot`.
+    fn fit_preferred(&mut self, slot: Slot) {
+        if self.is_bot() {
+            return;
+        }
+        let Some(id) = self.slot_weapon(slot).map(|w| w.id) else { return };
+        let pref = self.attachments_for(id);
+        for cat in 0..4 {
+            let Some(item) = pref.get(cat) else { continue };
+            let free = self.slot_weapon(slot).is_some_and(|w| w.att.get(cat).is_none());
+            if let Some(k) = self.inventory.iter().position(|x| *x == item).filter(|_| free) {
+                self.inventory.remove(k);
+                if let Some(w) = self.slot_weapon_mut(slot) {
+                    w.att.set(cat, Some(item));
+                }
+            }
+        }
     }
 
     pub fn set_attachments(&mut self, id: WeaponId, att: Attachments) {
@@ -437,8 +566,10 @@ impl Game {
         p.spawn_count += 1;
         if !keep_weapons {
             // Like a CSDM gun menu: humans get their last purchase back.
-            p.primary = if p.is_bot() { None } else { p.last_buy.map(|id| Weapon::with(id, p.attachments_for(id))) };
+            p.primary = if p.is_bot() { None } else { p.last_buy.map(Weapon::new) };
             p.secondary = Some(Weapon::new(WeaponId::Usp));
+            p.fit_preferred(Slot::Primary);
+            p.fit_preferred(Slot::Secondary);
         } else {
             // refill ammo like a surf server would
             if let Some(w) = p.primary.as_mut() {
@@ -507,31 +638,42 @@ impl Game {
     pub fn give(&mut self, idx: usize, id: WeaponId) {
         let slot = id.def().slot;
         let p = &mut self.players[idx];
-        let att = p.attachments_for(id);
+        if slot == Slot::Melee {
+            return;
+        }
+        p.strip_slot(slot);
+        let w = if p.is_bot() { Weapon::with(id, p.attachments_for(id)) } else { Weapon::new(id) };
         match slot {
             Slot::Primary => {
-                p.primary = Some(Weapon::with(id, att));
+                p.primary = Some(w);
                 p.last_buy = Some(id);
             }
-            Slot::Secondary => p.secondary = Some(Weapon::with(id, att)),
-            Slot::Melee => return,
+            _ => p.secondary = Some(w),
         }
+        p.fit_preferred(slot);
         self.equip(idx, slot);
         self.events.push(Event::Pickup { player: idx });
     }
 
-    /// Cycles one attachment category (0 sight, 1 muzzle, 2 stock, 3 grip)
-    /// of the weapon in hand. Only in the buy zone.
-    pub fn customize(&mut self, idx: usize, cat: usize, dir: i32) -> bool {
-        if !self.in_buyzone(idx) {
+    /// Mounts `item` (None: the default part) in category `cat` of the gun
+    /// in `slot`, taking it from the inventory and putting back what was
+    /// mounted before. Works anywhere, like a backpack.
+    pub fn mount(&mut self, idx: usize, slot: Slot, cat: usize, item: Option<AttItem>) -> bool {
+        let p = &mut self.players[idx];
+        let Some(cur) = p.slot_weapon(slot).map(|w| w.att.get(cat)) else { return false };
+        if cur == item || item.is_some_and(|it| it.category() != cat) {
             return false;
         }
-        let p = &mut self.players[idx];
-        let Some(w) = p.weapon_mut() else { return false };
-        w.att.cycle(cat, dir);
+        if let Some(it) = item {
+            let Some(k) = p.inventory.iter().position(|x| *x == it) else { return false };
+            p.inventory.remove(k);
+        }
+        let Some(w) = p.slot_weapon_mut(slot) else { return false };
+        let old = w.att.set(cat, item);
         let (id, att, levels) = (w.id, w.att, w.zoom_levels());
+        p.inventory.extend(old);
         p.set_attachments(id, att);
-        if p.zoom > levels {
+        if p.active == slot && p.zoom > levels {
             p.zoom = 0;
         }
         self.events.push(Event::Pickup { player: idx });
@@ -579,6 +721,8 @@ impl Game {
         if !p.alive {
             return;
         }
+        let active = p.active;
+        p.strip_slot(active);
         let w = match p.active {
             Slot::Primary => p.primary.take(),
             Slot::Secondary => p.secondary.take(),
@@ -755,6 +899,7 @@ impl Game {
         }
 
         // Triggers.
+        self.apply_boosters(i);
         let teleport = {
             let p = &self.players[i];
             self.map.in_kill_zone(p.pm.origin, p.pm.mins())
@@ -781,6 +926,45 @@ impl Game {
         self.touch_pickups(i, cmd.buttons & IN_USE != 0 && self.players[i].prev_buttons & IN_USE == 0);
         self.weapon_frame(i, cmd);
         self.players[i].prev_buttons = cmd.buttons;
+    }
+
+    /// Booster and launch pad volumes.
+    fn apply_boosters(&mut self, i: usize) {
+        let now = self.time;
+        let gravity = self.vars.gravity;
+        let p = &mut self.players[i];
+        let (origin, mins, maxs) = (p.pm.origin, p.pm.mins(), p.pm.maxs());
+        let mut boosted = false;
+        for b in &self.map.boosters {
+            if !b.zone.touches(origin, mins, maxs) {
+                continue;
+            }
+            match b.push {
+                Push::Boost { dir, speed, two_way } => {
+                    boosted = true;
+                    let dir = if two_way && p.pm.velocity.dot(dir) < 0.0 { -dir } else { dir };
+                    let along = p.pm.velocity.dot(dir);
+                    if along < speed {
+                        p.pm.velocity += dir * (BOOST_ACCEL * TICK).min(speed - along);
+                    }
+                }
+                Push::Launch { .. } => {
+                    if now < p.launch_ready {
+                        continue;
+                    }
+                    if let Some(v) = b.launch_velocity(gravity) {
+                        p.pm.velocity = v;
+                        p.pm.onground = false;
+                        p.launch_ready = now + 0.6;
+                        self.events.push(Event::Launch { player: i, pos: b.pad() });
+                    }
+                }
+            }
+        }
+        if boosted && !p.in_boost {
+            self.events.push(Event::Boost { player: i });
+        }
+        p.in_boost = boosted;
     }
 
     fn weapon_frame(&mut self, i: usize, cmd: UserCmd) {
@@ -1202,6 +1386,8 @@ impl Game {
         // Drop the best weapon.
         let drop = {
             let p = &mut self.players[victim];
+            p.strip_slot(Slot::Primary);
+            p.strip_slot(Slot::Secondary);
             let w = p.primary.take().or_else(|| p.secondary.take());
             w.map(|w| (w, p.pm.origin, p.pm.velocity, p.angles.y))
         };
@@ -1453,17 +1639,35 @@ impl Game {
                         let att = if is_bot {
                             crate::weapons::Attachments::random(&mut self.rng)
                         } else {
-                            self.players[i].attachments_for(id)
+                            Attachments::default()
                         };
                         let p = &mut self.players[i];
                         match slot {
                             Slot::Primary => p.primary = Some(Weapon::with(id, att)),
                             _ => p.secondary = Some(Weapon::with(id, att)),
                         }
+                        p.fit_preferred(slot);
                         self.equip(i, slot);
                         true
                     } else {
                         false
+                    }
+                }
+                PickupKind::Attachment(item) => {
+                    let p = &mut self.players[i];
+                    if p.is_bot() {
+                        false
+                    } else {
+                        p.inventory.push(item);
+                        p.last_item = Some((item, now));
+                        // Straight onto the gun in hand if that spot is free.
+                        let slot = p.active;
+                        let free = p.slot_weapon(slot).is_some_and(|w| w.att.get(item.category()).is_none());
+                        if free {
+                            self.mount(i, slot, item.category(), Some(item));
+                        }
+                        self.events.push(Event::AttachmentTaken { player: i, item });
+                        true
                     }
                 }
             };

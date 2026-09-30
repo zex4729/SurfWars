@@ -339,6 +339,13 @@ impl Batch {
         );
     }
 
+    /// A glowing strip lying in the plane spanned by `b - a` and `side`.
+    pub fn strip(&mut self, a: Vec3, b: Vec3, side: Vec3, width: f32, c: [u8; 4]) {
+        self.reserve(4, None);
+        let s = side * width;
+        self.quad([a - s, a + s, b + s, b - s], [vec2(0.0, 0.5), vec2(1.0, 0.5), vec2(1.0, 0.5), vec2(0.0, 0.5)], c);
+    }
+
     /// A glowing line segment facing the camera.
     pub fn beam(&mut self, a: Vec3, b: Vec3, cam: Vec3, width: f32, c: [u8; 4]) {
         self.reserve(4, None);
@@ -431,6 +438,18 @@ pub struct Renderer {
     decal: Batch,
     rng: Rng,
     time: f64,
+    /// Chevrons painted on boosters and launch pads.
+    boost_marks: Vec<BoostMark>,
+    /// Aim down sights blend for the local view model (0 hip, 1 aimed).
+    pub ads: f32,
+}
+
+struct BoostMark {
+    pos: Vec3,
+    fwd: Vec3,
+    side: Vec3,
+    launch: bool,
+    phase: f32,
 }
 
 pub struct View {
@@ -439,6 +458,9 @@ pub struct View {
     pub fov: f32,
     /// Player whose eyes we are looking through (hidden, draws the view model).
     pub first_person: Option<usize>,
+    /// Part of the screen to draw into (x, y from the top, w, h), for the
+    /// editor's four pane layout. None is the whole screen.
+    pub viewport: Option<(f32, f32, f32, f32)>,
 }
 
 pub fn team_color(t: Team) -> Vec3 {
@@ -532,10 +554,13 @@ impl Renderer {
             decal: Batch::default(),
             rng: Rng::new(99),
             time: 0.0,
+            boost_marks: Vec::new(),
+            ads: 0.0,
         };
         r.fx.tex = Some(r.tex.glow.clone());
         r.decal.tex = Some(r.tex.glow.clone());
         r.build_world(game);
+        r.build_boost_marks(game);
         r
     }
 
@@ -544,10 +569,83 @@ impl Renderer {
         self.world.clear();
         self.sky = build_sky(game);
         self.build_world(game);
+        self.build_boost_marks(game);
+    }
+
+    fn build_boost_marks(&mut self, game: &Game) {
+        use crate::map::Push;
+        self.boost_marks.clear();
+        for b in &game.map.boosters {
+            match b.push {
+                Push::Boost { dir, two_way, .. } => {
+                    // Paint chevrons on whatever surface is inside the zone.
+                    let h = vec3(dir.x, dir.y, 0.0).normalize_or(Vec3::X);
+                    let c = vec3(-h.y, h.x, 0.0);
+                    let z = b.zone;
+                    let corners = [
+                        vec3(z.mins.x, z.mins.y, 0.0),
+                        vec3(z.maxs.x, z.mins.y, 0.0),
+                        vec3(z.mins.x, z.maxs.y, 0.0),
+                        vec3(z.maxs.x, z.maxs.y, 0.0),
+                    ];
+                    let (mut a0, mut a1, mut c0, mut c1) = (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
+                    for p in corners {
+                        a0 = a0.min(p.dot(h));
+                        a1 = a1.max(p.dot(h));
+                        c0 = c0.min(p.dot(c));
+                        c1 = c1.max(p.dot(c));
+                    }
+                    let step = 150.0;
+                    let mut a = a0 + step * 0.5;
+                    while a < a1 {
+                        let mut k = c0 + step * 0.5;
+                        while k < c1 {
+                            let xy = h * a + c * k;
+                            let top = vec3(xy.x, xy.y, z.maxs.z);
+                            let tr = game.map.world.trace_ray(top, vec3(xy.x, xy.y, z.mins.z));
+                            if tr.hit() && tr.normal.z > 0.05 {
+                                let n = tr.normal;
+                                let fwd = (dir - n * dir.dot(n)).normalize_or_zero();
+                                if fwd != Vec3::ZERO {
+                                    let dirs: &[f32] = if two_way { &[1.0, -1.0] } else { &[1.0] };
+                                    for &sg in dirs {
+                                        let f = fwd * sg;
+                                        let off = if two_way { f * 22.0 } else { Vec3::ZERO };
+                                        self.boost_marks.push(BoostMark {
+                                            pos: tr.endpos + n * 2.5 + off,
+                                            fwd: f,
+                                            side: n.cross(f),
+                                            launch: false,
+                                            phase: (a - a0) / step * sg,
+                                        });
+                                    }
+                                }
+                            }
+                            k += step;
+                        }
+                        a += step;
+                    }
+                }
+                Push::Launch { .. } => {
+                    let v = b.launch_velocity(game.vars.gravity).unwrap_or(Vec3::Z);
+                    let fwd = vec3(v.x, v.y, 0.0).normalize_or(Vec3::X);
+                    for i in 0..3 {
+                        self.boost_marks.push(BoostMark {
+                            pos: b.pad() + vec3(0.0, 0.0, 2.5) + fwd * (i as f32 * 28.0 - 28.0),
+                            fwd,
+                            side: Vec3::Z.cross(fwd),
+                            launch: true,
+                            phase: i as f32,
+                        });
+                    }
+                }
+            }
+        }
     }
 
     fn build_world(&mut self, game: &Game) {
-        let mut groups: Vec<(Tex, Vec<Vertex>, Vec<u16>, Vec<Mesh>)> = Vec::new();
+        type Group = (Tex, Vec<Vertex>, Vec<u16>, Vec<Mesh>);
+        let mut groups: Vec<Group> = Vec::new();
         for b in &game.map.world.brushes {
             if !b.mat.visible() {
                 continue;
@@ -729,7 +827,15 @@ impl Renderer {
     }
 
     pub fn draw(&mut self, game: &Game, view: &View, alpha: f32, show_viewmodel: bool) {
+        let dt = (game.time - self.time).clamp(0.0, 0.1) as f32;
         self.time = game.time;
+        // Aim down sights blend for the first person view model.
+        let ads_target = view
+            .first_person
+            .map(|i| &game.players[i])
+            .and_then(|p| p.weapon().map(|w| w.ads_view(p.zoom)))
+            .unwrap_or(false);
+        self.ads = crate::util::approach(self.ads, if ads_target { 1.0 } else { 0.0 }, dt * 7.0);
         let (_, right, up) = angle_vectors(view.angles);
         let cam = camera_for(view);
         clear_background(Color::new(game.map.fog_color[0], game.map.fog_color[1], game.map.fog_color[2], 1.0));
@@ -808,6 +914,9 @@ impl Renderer {
                     let m = base * Mat4::from_scale(Vec3::splat(1.3)) * Mat4::from_translation(vec3(-4.0, 0.0, 0.0));
                     draw_weapon_model(&mut self.solid, id, crate::weapons::Attachments::default(), &m);
                 }
+                crate::map::PickupKind::Attachment(item) => {
+                    draw_attachment_model(&mut self.solid, item, &(base * Mat4::from_scale(Vec3::splat(3.0))));
+                }
             }
         }
         self.solid.flush(None);
@@ -878,11 +987,31 @@ impl Renderer {
         // Pickup glows, rockets, laser beams and explosion flashes.
         for pk in &game.pickups {
             if pk.available_at <= game.time {
-                let c = match pk.def.kind {
-                    crate::map::PickupKind::Health => [80, 255, 120, 110],
-                    crate::map::PickupKind::Weapon(_) => [255, 210, 80, 130],
+                let (c, size) = match pk.def.kind {
+                    crate::map::PickupKind::Health => ([80, 255, 120, 110], 34.0),
+                    crate::map::PickupKind::Weapon(_) => ([255, 210, 80, 130], 34.0),
+                    crate::map::PickupKind::Attachment(a) if a.rare() => ([255, 120, 255, 170], 46.0),
+                    crate::map::PickupKind::Attachment(a) => {
+                        let c = a.color();
+                        ([c[0], c[1], c[2], 130], 30.0)
+                    }
                 };
-                self.fx.sprite(pk.def.pos, right, up, 34.0, c);
+                self.fx.sprite(pk.def.pos, right, up, size, c);
+            }
+        }
+        // Booster chevrons scroll along the push direction.
+        for m in &self.boost_marks {
+            let wave = ((m.phase * 0.25 - now as f32 * if m.launch { 1.5 } else { 2.0 }).rem_euclid(1.0) - 0.5).abs();
+            let a = 0.45 + 0.55 * (1.0 - wave * 2.0).powi(3);
+            let (col, size) = if m.launch { ([255u8, 150, 40], 22.0) } else { ([90u8, 255, 235], 40.0) };
+            let c = [col[0], col[1], col[2], (a * 255.0) as u8];
+            let tip = m.pos + m.fwd * size * 0.6;
+            let w0 = m.pos - m.fwd * size * 0.4 - m.side * size;
+            let w1 = m.pos - m.fwd * size * 0.4 + m.side * size;
+            let n = m.side.cross(m.fwd);
+            for _ in 0..2 {
+                self.fx.strip(w0, tip, n.cross(tip - w0).normalize_or_zero(), 7.0, c);
+                self.fx.strip(w1, tip, n.cross(tip - w1).normalize_or_zero(), 7.0, c);
             }
         }
         for r in &game.rockets {
@@ -966,10 +1095,20 @@ impl Renderer {
         if show_viewmodel {
             if let Some(i) = view.first_person {
                 let p = &game.players[i];
-                if p.alive && p.zoom == 0 {
+                if p.alive && !p.weapon().is_some_and(|w| w.scope_view(p.zoom)) {
                     clear_depth();
                     gl_use_material(&self.world_mat);
-                    draw_viewmodel(&mut self.solid, &mut self.fx, p, view, game.time, &self.tex.glow, &self.fx_mat);
+                    let ads = self.ads;
+                    draw_viewmodel(
+                        &mut self.solid,
+                        &mut self.fx,
+                        p,
+                        view,
+                        game.time,
+                        ads,
+                        &self.tex.glow,
+                        &self.fx_mat,
+                    );
                 }
             }
         }
@@ -1012,6 +1151,10 @@ fn vfov(hfov_deg: f32) -> f32 {
 /// The 3D camera for a view (also used by the editor for overlays).
 pub fn camera_for(view: &View) -> Camera3D {
     let (fwd, _, up) = angle_vectors(view.angles);
+    // GL viewports count from the bottom of the screen.
+    let viewport = view.viewport.map(|(x, y, w, h)| {
+        (x.round() as i32, (screen_height() - y - h).round() as i32, w.round() as i32, h.round() as i32)
+    });
     Camera3D {
         position: view.pos,
         target: view.pos + fwd,
@@ -1019,6 +1162,8 @@ pub fn camera_for(view: &View) -> Camera3D {
         fovy: vfov(view.fov),
         z_near: 2.0,
         z_far: 40000.0,
+        aspect: view.viewport.map(|(_, _, w, h)| w / h.max(1.0)),
+        viewport,
         ..Default::default()
     }
 }
@@ -1217,6 +1362,53 @@ pub fn muzzle_tip(id: WeaponId) -> f32 {
 }
 
 /// Weapon model in local space: x forward, z up, origin at the grip.
+/// Height above the gun model's origin of the centre of a sight's window.
+fn sight_line(id: WeaponId, sight: crate::weapons::Sight) -> f32 {
+    use crate::weapons::Sight;
+    let top = if id == WeaponId::Rocket { 5.3 } else { 3.2 };
+    match sight {
+        Sight::RedDot => top + 1.0,
+        Sight::Holo => top + 1.4,
+        _ => top + 0.6,
+    }
+}
+
+/// A loose attachment, for pickups and the inventory.
+pub fn draw_attachment_model(b: &mut Batch, item: crate::weapons::AttItem, m: &Mat4) {
+    use crate::weapons::{AttItem, Grip, Muzzle, Sight, Stock};
+    let mut part = |c: Vec3, size: Vec3, color: Vec3| {
+        b.cube(&(*m * Mat4::from_translation(c) * Mat4::from_scale(size)), color);
+    };
+    let black = vec3(0.08, 0.08, 0.09);
+    let dark = vec3(0.2, 0.2, 0.22);
+    let steel = vec3(0.5, 0.52, 0.55);
+    match item {
+        AttItem::Sight(Sight::RedDot) => {
+            part(vec3(0.0, 0.0, 0.0), vec3(2.6, 1.4, 1.6), black);
+            part(vec3(-1.2, 0.0, 0.1), vec3(0.3, 0.8, 0.8), vec3(1.0, 0.1, 0.1));
+            part(vec3(0.0, 0.0, -1.0), vec3(3.0, 1.6, 0.4), dark);
+        }
+        AttItem::Sight(Sight::Holo) => {
+            part(vec3(0.0, 0.0, -0.4), vec3(3.4, 2.0, 0.8), black);
+            part(vec3(0.8, 0.0, 0.8), vec3(0.5, 2.0, 1.8), black);
+            part(vec3(0.5, 0.0, 0.7), vec3(0.2, 1.4, 1.2), vec3(0.3, 1.0, 0.5));
+        }
+        AttItem::Sight(_) => {
+            part(vec3(0.0, 0.0, 0.0), vec3(6.5, 1.6, 1.6), black);
+            part(vec3(3.4, 0.0, 0.0), vec3(0.4, 1.9, 1.9), dark);
+            part(vec3(0.0, 0.0, -1.1), vec3(3.0, 1.2, 0.6), dark);
+        }
+        AttItem::Muzzle(Muzzle::Suppressor) => part(Vec3::ZERO, vec3(6.5, 1.5, 1.5), black),
+        AttItem::Muzzle(Muzzle::Compensator) => part(Vec3::ZERO, vec3(2.5, 1.7, 1.7), steel),
+        AttItem::Muzzle(_) => part(Vec3::ZERO, vec3(6.0, 0.9, 0.9), dark),
+        AttItem::Stock(Stock::Light) => part(Vec3::ZERO, vec3(3.0, 0.6, 2.4), steel),
+        AttItem::Stock(_) => part(Vec3::ZERO, vec3(4.0, 2.0, 3.6), black),
+        AttItem::Grip(Grip::Angled) => part(Vec3::ZERO, vec3(2.4, 1.2, 1.4), dark),
+        AttItem::Grip(Grip::Stubby) => part(Vec3::ZERO, vec3(1.3, 1.2, 1.6), black),
+        AttItem::Grip(_) => part(Vec3::ZERO, vec3(1.2, 1.2, 3.0), black),
+    }
+}
+
 pub fn draw_weapon_model(b: &mut Batch, id: WeaponId, att: crate::weapons::Attachments, m: &Mat4) {
     let black = vec3(0.12, 0.12, 0.13);
     let dark = vec3(0.22, 0.22, 0.24);
@@ -1301,13 +1493,22 @@ pub fn draw_weapon_model(b: &mut Batch, id: WeaponId, att: crate::weapons::Attac
         match att.sight {
             Sight::Iron => {}
             Sight::RedDot => {
-                part(vec3(3.0, 0.0, top + 0.8), vec3(2.6, 1.4, 1.6), black);
-                part(vec3(1.8, 0.0, top + 0.9), vec3(0.3, 0.8, 0.8), vec3(1.0, 0.1, 0.1));
+                // an open tube you look through: base, two sides and a top
+                let c = top + 1.0;
+                part(vec3(3.0, 0.0, top + 0.2), vec3(2.6, 1.4, 0.4), black);
+                part(vec3(3.0, 0.62, c), vec3(2.6, 0.18, 1.3), black);
+                part(vec3(3.0, -0.62, c), vec3(2.6, 0.18, 1.3), black);
+                part(vec3(3.0, 0.0, c + 0.68), vec3(2.6, 1.4, 0.18), black);
+                part(vec3(1.8, 0.0, top + 0.42), vec3(0.2, 0.2, 0.1), vec3(1.0, 0.1, 0.1));
             }
             Sight::Holo => {
-                part(vec3(3.0, 0.0, top + 0.4), vec3(3.4, 2.0, 0.8), black);
-                part(vec3(3.8, 0.0, top + 1.6), vec3(0.5, 2.0, 1.8), black);
-                part(vec3(3.5, 0.0, top + 1.5), vec3(0.2, 1.4, 1.2), vec3(0.3, 1.0, 0.5));
+                // a flat base and a window frame at the front
+                let c = top + 1.4;
+                part(vec3(3.0, 0.0, top + 0.3), vec3(3.4, 2.0, 0.6), black);
+                part(vec3(3.9, 0.92, c), vec3(0.5, 0.18, 1.7), black);
+                part(vec3(3.9, -0.92, c), vec3(0.5, 0.18, 1.7), black);
+                part(vec3(3.9, 0.0, c + 0.86), vec3(0.5, 2.0, 0.18), black);
+                part(vec3(2.2, 0.0, top + 0.66), vec3(0.3, 0.5, 0.12), vec3(0.3, 1.0, 0.5));
             }
             Sight::Acog => {
                 part(vec3(3.0, 0.0, top + 1.2), vec3(6.5, 1.6, 1.6), black);
@@ -1412,6 +1613,7 @@ fn draw_viewmodel(
     p: &Player,
     view: &View,
     time: f64,
+    ads: f32,
     glow: &Texture2D,
     fx_mat: &Material,
 ) {
@@ -1458,7 +1660,11 @@ fn draw_viewmodel(
 
     // big guns sit further forward so their back end stays off the screen
     let push = if id == WeaponId::Rocket { vec3(12.0, -1.5, -1.5) } else { Vec3::ZERO };
-    let local = vec3(18.0 - kick * kick_amt * 2.0, -6.5, -7.0 - dip) + bob + push;
+    let hip = vec3(18.0 - kick * kick_amt * 2.0, -6.5, -7.0 - dip) + bob + push;
+    // Aimed: the sight's window sits on the view axis, close to the eye.
+    let att = p.weapon().map(|w| w.att).unwrap_or_default();
+    let aimed = vec3(3.5 - kick * kick_amt * 0.8, 0.0, -sight_line(id, att.sight) - dip) + bob * 0.15;
+    let local = hip.lerp(aimed, ads);
     let origin = view.pos + f * local.x + l * local.y + u * local.z;
     let basis = Mat4::from_cols(f.extend(0.0), l.extend(0.0), u.extend(0.0), origin.extend(1.0));
     let extra = Quat::from_rotation_y(-(kick * kick_amt * 0.12))
@@ -1490,7 +1696,6 @@ fn draw_viewmodel(
         arm(b, vec3(-4.0, 8.0, -8.0), fore - vec3(0.8, -0.4, 0.6), shirt, 2.6);
         arm(b, fore - vec3(1.0, 0.0, 0.5), fore + vec3(0.6, 0.0, 0.1), glove, 2.2);
     }
-    let att = p.weapon().map(|w| w.att).unwrap_or_default();
     draw_weapon_model(b, id, att, &m);
     b.flush(None);
 

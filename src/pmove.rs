@@ -54,6 +54,11 @@ pub struct MoveVars {
     pub bhop_cap: bool,
     /// Hold jump to bunny hop. Off by default, like stock CS.
     pub autobhop: bool,
+    /// Air strafe speed cap while touching a surf ramp. GoldSrc hard codes
+    /// 30 everywhere, which only lets you hover on a ramp. Old surf servers
+    /// raised it so holding into a ramp climbs it and launches you high off
+    /// the top. Gravity is unchanged.
+    pub ramp_climb: f32,
 }
 
 impl MoveVars {
@@ -72,6 +77,7 @@ impl MoveVars {
             bounce: 1.0,
             bhop_cap: true,
             autobhop: false,
+            ramp_climb: 30.0,
         }
     }
 
@@ -84,6 +90,7 @@ impl MoveVars {
             maxvelocity: 5000.0,
             bhop_cap: false,
             autobhop: true,
+            ramp_climb: 160.0,
             ..MoveVars::stock()
         }
     }
@@ -91,7 +98,7 @@ impl MoveVars {
     /// The usual CS 1.6 surf server configuration: everything stock except
     /// `sv_airaccelerate 100`, `sv_maxvelocity 3500` and no bunny hop cap.
     pub fn surf_server() -> MoveVars {
-        MoveVars { airaccelerate: 100.0, maxvelocity: 3500.0, bhop_cap: false, ..MoveVars::stock() }
+        MoveVars { airaccelerate: 100.0, maxvelocity: 3500.0, bhop_cap: false, ramp_climb: 100.0, ..MoveVars::stock() }
     }
 }
 
@@ -578,7 +585,9 @@ impl<'a> PlayerMove<'a> {
         if self.s.dead {
             return;
         }
-        let wishspd = wishspeed.min(30.0);
+        // Touched a surf ramp last tick: the ramp climb cap applies.
+        let cap = if self.s.surf_time < 0.025 { self.vars.ramp_climb.max(30.0) } else { 30.0 };
+        let wishspd = wishspeed.min(cap);
         let currentspeed = self.s.velocity.dot(wishdir);
         let addspeed = wishspd - currentspeed;
         if addspeed <= 0.0 {

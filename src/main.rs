@@ -57,6 +57,8 @@ struct Args {
     no_audio: bool,
     team: Option<Team>,
     look: Option<(f32, f32)>,
+    /// Free camera position for screenshots (with --look).
+    at: Option<Vec3>,
     ui: Option<String>,
 }
 
@@ -107,6 +109,15 @@ fn parse_args() -> Args {
                 a.ui = next;
                 i += 1;
             }
+            "--at" => {
+                if let Some(s) = next {
+                    let p: Vec<f32> = s.split(',').filter_map(|x| x.parse().ok()).collect();
+                    if p.len() == 3 {
+                        a.at = Some(vec3(p[0], p[1], p[2]));
+                    }
+                }
+                i += 1;
+            }
             "--menu" => a.menu = true,
             "--no-audio" | "--mute" => a.no_audio = true,
             _ => {}
@@ -154,6 +165,7 @@ impl Options {
                     "sv_maxvelocity" => o.settings.vars.maxvelocity = v.parse().unwrap_or(3500.0),
                     "sv_accelerate" => o.settings.vars.accelerate = v.parse().unwrap_or(5.0),
                     "sv_friction" => o.settings.vars.friction = v.parse().unwrap_or(4.0),
+                    "ramp_climb" => o.settings.vars.ramp_climb = v.parse().unwrap_or(100.0),
                     "ramp_accuracy" => o.settings.ramp_accuracy = v == "1",
                     "deathmatch" => o.settings.mode = if v == "1" { Mode::Deathmatch } else { Mode::Rounds },
                     "difficulty" => {
@@ -174,7 +186,7 @@ impl Options {
     fn save(&self) {
         let s = &self.settings;
         let text = format!(
-            "sensitivity {}\nvolume {}\nname \"{}\"\nmap {}\nbots_t {}\nbots_ct {}\nteam {}\nautobhop {}\ndeathmatch {}\ndifficulty {}\nramp_accuracy {}\nbhop_cap {}\nsv_airaccelerate {}\nsv_gravity {}\nsv_maxvelocity {}\nsv_accelerate {}\nsv_friction {}\n",
+            "sensitivity {}\nvolume {}\nname \"{}\"\nmap {}\nbots_t {}\nbots_ct {}\nteam {}\nautobhop {}\ndeathmatch {}\ndifficulty {}\nramp_accuracy {}\nbhop_cap {}\nsv_airaccelerate {}\nsv_gravity {}\nsv_maxvelocity {}\nsv_accelerate {}\nsv_friction {}\nramp_climb {}\n",
             self.sensitivity,
             self.volume,
             s.player_name,
@@ -192,6 +204,7 @@ impl Options {
             s.vars.maxvelocity,
             s.vars.accelerate,
             s.vars.friction,
+            s.vars.ramp_climb,
         );
         let _ = std::fs::write(Self::path(), text);
     }
@@ -224,12 +237,20 @@ impl Ui {
     }
 }
 
-/// The surf movement settings with presets. Returns true if anything changed.
-fn movement_panel(ui: &Ui, vars: &mut MoveVars, x: f32, y: f32, w: f32) -> bool {
+/// A number being typed into one of the settings boxes.
+#[derive(Clone, Debug, Default)]
+struct NumEdit {
+    field: Option<usize>,
+    text: String,
+}
+
+/// The surf movement settings: presets, typed values and toggles.
+/// Returns true if anything changed.
+fn movement_panel(ui: &Ui, vars: &mut MoveVars, edit: &mut NumEdit, x: f32, y: f32, w: f32) -> bool {
     let s = ui.scale;
-    let h = 34.0 * s;
-    let step = h * 1.18;
-    let rows = 9.0;
+    let h = 32.0 * s;
+    let step = h * 1.16;
+    let rows = 11.0;
     draw_rectangle(x - 10.0 * s, y - 40.0 * s, w + 20.0 * s, step * rows + 56.0 * s, Color::new(0.0, 0.0, 0.0, 0.6));
     text_shadow("Movement settings", x, y - 12.0 * s, 24.0 * s, HUD_COLOR);
     let mut changed = false;
@@ -248,6 +269,7 @@ fn movement_panel(ui: &Ui, vars: &mut MoveVars, x: f32, y: f32, w: f32) -> bool 
                 && p.accelerate == vars.accelerate
                 && p.friction == vars.friction
                 && p.bhop_cap == vars.bhop_cap
+                && p.ramp_climb == vars.ramp_climb
         })
         .map(|(n, _)| *n)
         .unwrap_or("Custom");
@@ -258,40 +280,110 @@ fn movement_panel(ui: &Ui, vars: &mut MoveVars, x: f32, y: f32, w: f32) -> bool 
         if presets[i].0 != "Easy surf" {
             vars.autobhop = auto;
         }
+        edit.field = None;
         changed = true;
     }
     yy += step;
-    // label, value, steps
-    let row = |label: &str, val: &mut f32, steps: &[f32], yy: f32| -> bool {
-        let bw = h * 1.2;
-        text_shadow(&format!("{label}: {}", *val), x, yy + h * 0.68, 20.0 * s, WHITE);
-        let i = steps.iter().position(|v| *v >= *val - 0.001).unwrap_or(steps.len() - 1);
-        let mut c = false;
-        if ui.button("-", x + w - bw * 2.0 - 6.0 * s, yy, bw, h) && i > 0 {
-            *val = steps[i - 1];
-            c = true;
-        }
-        if ui.button("+", x + w - bw, yy, bw, h) && i + 1 < steps.len() {
-            *val = if steps[i] > *val + 0.001 { steps[i] } else { steps[i + 1] };
-            c = true;
-        }
+
+    // Typed values: click a box, type, Enter (or Tab for the next box).
+    let fields: [(&str, f32, f32); 6] = [
+        ("sv_airaccelerate", 0.0, 10000.0),
+        ("sv_gravity", 50.0, 4000.0),
+        ("sv_maxvelocity", 100.0, 20000.0),
+        ("sv_accelerate", 0.0, 100.0),
+        ("sv_friction", 0.0, 20.0),
+        ("Ramp climb (surf up)", 30.0, 3000.0),
+    ];
+    let get = |v: &MoveVars, i: usize| match i {
+        0 => v.airaccelerate,
+        1 => v.gravity,
+        2 => v.maxvelocity,
+        3 => v.accelerate,
+        4 => v.friction,
+        _ => v.ramp_climb,
+    };
+    let commit = |v: &mut MoveVars, i: usize, text: &str| -> bool {
+        let Ok(x) = text.trim().parse::<f32>() else { return false };
+        let x = x.clamp(fields[i].1, fields[i].2);
+        let slot = match i {
+            0 => &mut v.airaccelerate,
+            1 => &mut v.gravity,
+            2 => &mut v.maxvelocity,
+            3 => &mut v.accelerate,
+            4 => &mut v.friction,
+            _ => &mut v.ramp_climb,
+        };
+        let c = *slot != x;
+        *slot = x;
         c
     };
-    changed |=
-        row("sv_airaccelerate", &mut vars.airaccelerate, &[10.0, 50.0, 100.0, 150.0, 200.0, 300.0, 500.0, 1000.0], yy);
-    yy += step;
-    let grav: Vec<f32> = (6..=24).map(|i| i as f32 * 50.0).collect();
-    changed |= row("sv_gravity", &mut vars.gravity, &grav, yy);
-    yy += step;
-    let maxv: Vec<f32> = (4..=20).map(|i| i as f32 * 500.0).collect();
-    changed |= row("sv_maxvelocity", &mut vars.maxvelocity, &maxv, yy);
-    yy += step;
-    let acc: Vec<f32> = (1..=20).map(|i| i as f32).collect();
-    changed |= row("sv_accelerate", &mut vars.accelerate, &acc, yy);
-    yy += step;
-    let fr: Vec<f32> = (0..=10).map(|i| i as f32).collect();
-    changed |= row("sv_friction", &mut vars.friction, &fr, yy);
-    yy += step;
+    // keyboard input for the focused box
+    if let Some(f) = edit.field {
+        while let Some(c) = get_char_pressed() {
+            if (c.is_ascii_digit() || c == '.' || c == '-') && edit.text.len() < 9 {
+                edit.text.push(c);
+            }
+        }
+        if is_key_pressed(KeyCode::Backspace) {
+            edit.text.pop();
+        }
+        if is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::KpEnter) {
+            changed |= commit(vars, f, &edit.text);
+            edit.field = None;
+        } else if is_key_pressed(KeyCode::Tab) {
+            changed |= commit(vars, f, &edit.text);
+            let n = (f + 1) % fields.len();
+            edit.field = Some(n);
+            edit.text = format!("{}", get(vars, n));
+        }
+    }
+    let bw = w * 0.36;
+    for (i, (label, lo, hi)) in fields.iter().enumerate() {
+        text_shadow(label, x, yy + h * 0.68, 19.0 * s, WHITE);
+        let bx = x + w - bw;
+        let hover = ui.mouse.x >= bx && ui.mouse.x <= bx + bw && ui.mouse.y >= yy && ui.mouse.y <= yy + h;
+        let focused = edit.field == Some(i);
+        draw_rectangle(bx, yy, bw, h, Color::new(0.0, 0.0, 0.0, if focused { 0.8 } else { 0.5 }));
+        let border = if focused {
+            1.0
+        } else if hover {
+            0.8
+        } else {
+            0.4
+        };
+        draw_rectangle_lines(bx, yy, bw, h, 2.0, Color::new(1.0, 0.69, 0.1, border));
+        let shown = if focused {
+            let blink = (get_time() * 2.0) as i64 % 2 == 0;
+            format!("{}{}", edit.text, if blink { "_" } else { " " })
+        } else {
+            format!("{}", get(vars, i))
+        };
+        text(&shown, bx + 8.0 * s, yy + h * 0.68, 19.0 * s, if focused { HUD_COLOR } else { WHITE });
+        if hover {
+            text(&format!("{lo} - {hi}"), bx - 110.0 * s, yy + h * 0.68, 13.0 * s, GRAY);
+        }
+        if ui.clicked && hover && !focused {
+            if let Some(f) = edit.field {
+                changed |= commit(vars, f, &edit.text);
+            }
+            edit.field = Some(i);
+            edit.text = format!("{}", get(vars, i));
+            while get_char_pressed().is_some() {}
+        }
+        yy += step;
+    }
+    // clicking anywhere else applies the value being typed
+    if ui.clicked {
+        if let Some(f) = edit.field {
+            let bx = x + w - bw;
+            let fy = y + step * (f as f32 + 1.0);
+            let inside = ui.mouse.x >= bx && ui.mouse.x <= bx + bw && ui.mouse.y >= fy && ui.mouse.y <= fy + h;
+            if !inside {
+                changed |= commit(vars, f, &edit.text);
+                edit.field = None;
+            }
+        }
+    }
     if ui.button(&format!("Auto bunnyhop: {}", if vars.autobhop { "On" } else { "Off" }), x, yy, w, h) {
         vars.autobhop = !vars.autobhop;
         changed = true;
@@ -302,13 +394,13 @@ fn movement_panel(ui: &Ui, vars: &mut MoveVars, x: f32, y: f32, w: f32) -> bool 
         changed = true;
     }
     yy += step;
-    text(
+    for l in [
         "Higher airaccelerate and lower gravity make ramps more forgiving.",
-        x,
-        yy + 14.0 * s,
-        15.0 * s,
-        Color::new(0.85, 0.85, 0.85, 1.0),
-    );
+        "Ramp climb: 30 is stock CS; higher lets you surf up ramps and fly high.",
+    ] {
+        text(l, x, yy + 14.0 * s, 14.0 * s, Color::new(0.85, 0.85, 0.85, 1.0));
+        yy += 18.0 * s;
+    }
     changed
 }
 
@@ -334,7 +426,11 @@ struct App {
     paused: bool,
     third_person: bool,
     buy_menu: bool,
-    buy_page: u8,
+    num_edit: NumEdit,
+    /// Attachment inventory screen.
+    inventory: bool,
+    inv_tab: usize,
+    inv_slot: Slot,
     show_move_panel: bool,
     menu_map_changed: bool,
     editor: Option<editor::Editor>,
@@ -443,6 +539,7 @@ impl App {
         self.view = self.game.local_player().map(|p| p.angles).unwrap_or(Vec3::ZERO);
         self.paused = false;
         self.buy_menu = false;
+        self.inventory = false;
         self.third_person = false;
         self.spec_target = 0;
         self.was_alive = true;
@@ -519,7 +616,7 @@ impl App {
         if is_key_down(KeyCode::LeftControl) || is_key_down(KeyCode::C) {
             cmd.buttons |= IN_DUCK;
         }
-        if !self.buy_menu {
+        if !self.buy_menu && !self.inventory {
             if is_mouse_button_down(MouseButton::Left) {
                 cmd.buttons |= IN_ATTACK;
             }
@@ -547,33 +644,34 @@ impl App {
         }
         if is_key_pressed(KeyCode::B) {
             self.buy_menu = !self.buy_menu;
-            self.buy_page = 0;
+            self.set_inventory(false);
+        }
+        if is_key_pressed(KeyCode::I) {
+            let open = !self.inventory;
+            self.set_inventory(open);
+            self.buy_menu = false;
+            if open {
+                self.inv_slot = if self.game.players[li].primary.is_some() { Slot::Primary } else { Slot::Secondary };
+            }
         }
         let alive = self.game.players[li].alive;
+        let keys = [KeyCode::Key1, KeyCode::Key2, KeyCode::Key3, KeyCode::Key4];
+        if self.inventory {
+            for (i, k) in keys.iter().enumerate() {
+                if is_key_pressed(*k) {
+                    self.inv_tab = i;
+                }
+            }
+            return;
+        }
         if self.buy_menu {
-            let keys = [KeyCode::Key1, KeyCode::Key2, KeyCode::Key3, KeyCode::Key4];
-            if self.buy_page == 0 {
-                for (i, id) in ALL_BUYABLE.iter().enumerate() {
-                    if is_key_pressed(keys[i]) && self.game.buy(li, *id) {
-                        self.buy_menu = false;
-                    }
-                }
-                if is_key_pressed(KeyCode::Key4) && self.game.players[li].weapon().is_some() {
-                    self.buy_page = 1;
-                }
-                if is_key_pressed(KeyCode::Key0) {
+            for (i, id) in ALL_BUYABLE.iter().enumerate() {
+                if is_key_pressed(keys[i]) && self.game.buy(li, *id) {
                     self.buy_menu = false;
                 }
-            } else {
-                let back = is_key_down(KeyCode::LeftShift);
-                for (cat, k) in keys.iter().enumerate() {
-                    if is_key_pressed(*k) {
-                        self.game.customize(li, cat, if back { -1 } else { 1 });
-                    }
-                }
-                if is_key_pressed(KeyCode::Key0) {
-                    self.buy_page = 0;
-                }
+            }
+            if is_key_pressed(KeyCode::Key0) {
+                self.buy_menu = false;
             }
             return;
         }
@@ -683,10 +781,14 @@ impl App {
         let (f, _, _) = angle_vectors(angles);
         let want = pos - f * dist + vec3(0.0, 0.0, 28.0);
         let tr = self.game.map.world.trace(pos, want, vec3(-6.0, -6.0, -6.0), vec3(6.0, 6.0, 6.0));
-        View { pos: tr.endpos, angles, fov: 90.0, first_person: None }
+        View { pos: tr.endpos, angles, fov: 90.0, first_person: None, viewport: None }
     }
 
     fn compute_view(&mut self, alpha: f32) -> (View, bool) {
+        if let Some(pos) = self.args.at {
+            let (p, y) = self.args.look.unwrap_or((20.0, 0.0));
+            return (View { pos, angles: vec3(p, y, 0.0), fov: 90.0, first_person: None, viewport: None }, false);
+        }
         let g = &self.game;
         if let Some(li) = g.local {
             let p = &g.players[li];
@@ -696,7 +798,7 @@ impl App {
                 }
                 let pos = p.prev_origin.lerp(p.pm.origin, alpha) + vec3(0.0, 0.0, p.pm.view_ofs);
                 let angles = self.view + p.pm.punchangle;
-                return (View { pos, angles, fov: p.fov(), first_person: Some(li) }, true);
+                return (View { pos, angles, fov: p.fov(), first_person: Some(li), viewport: None }, true);
             }
             if g.time - p.death_time < 2.0 {
                 // death cam: look at our body from above
@@ -708,7 +810,16 @@ impl App {
                 let p = &g.players[t];
                 if self.spec_first_person {
                     let pos = p.prev_origin.lerp(p.pm.origin, alpha) + vec3(0.0, 0.0, p.pm.view_ofs);
-                    (View { pos, angles: p.angles + p.pm.punchangle, fov: p.fov(), first_person: Some(t) }, true)
+                    (
+                        View {
+                            pos,
+                            angles: p.angles + p.pm.punchangle,
+                            fov: p.fov(),
+                            first_person: Some(t),
+                            viewport: None,
+                        },
+                        true,
+                    )
                 } else {
                     (self.chase_view(t, self.view, 150.0, alpha), false)
                 }
@@ -725,7 +836,7 @@ impl App {
                 let e = (hi - lo) * 0.5;
                 let pos = vec3(c.x - e.x * 1.05, c.y - e.y * 1.25, hi.z + e.x.max(e.y) * 0.45);
                 let (pitch, yaw) = util::vec_to_angles(c - pos);
-                (View { pos, angles: vec3(pitch, yaw, 0.0), fov: 90.0, first_person: None }, false)
+                (View { pos, angles: vec3(pitch, yaw, 0.0), fov: 90.0, first_person: None, viewport: None }, false)
             }
         }
     }
@@ -734,13 +845,17 @@ impl App {
         if is_key_pressed(KeyCode::Escape) {
             if self.buy_menu {
                 self.buy_menu = false;
+            } else if self.inventory {
+                self.set_inventory(false);
             } else {
                 self.paused = !self.paused;
                 self.grab(!self.paused);
             }
         }
         if !self.paused {
-            self.mouse_look();
+            if !self.inventory {
+                self.mouse_look();
+            }
             self.handle_keys();
         }
 
@@ -805,15 +920,193 @@ impl App {
                 || self.game.phase == game::Phase::Over
                 || self.args.ui.as_deref() == Some("scores"),
             buy_menu: self.buy_menu,
-            buy_page: self.buy_page,
             view_angles: if fp { view.angles } else { self.view },
             third_person: !fp,
             fps: self.fps,
         });
 
+        if self.inventory && !self.paused {
+            self.draw_inventory();
+        }
         if self.paused {
             self.draw_pause();
         }
+    }
+
+    fn set_inventory(&mut self, open: bool) {
+        if self.inventory != open {
+            self.inventory = open;
+            self.grab(!open);
+        }
+    }
+
+    /// The attachment inventory: tabs for the four attachment types, the
+    /// items you carry, and the two guns you can fit them to.
+    fn draw_inventory(&mut self) {
+        use weapons::{AttItem, ATT_CATEGORIES};
+        let Some(li) = self.game.local else { return };
+        let ui = Ui::new();
+        let s = ui.scale;
+        let sw = screen_width();
+        let sh = screen_height();
+        let w = (820.0 * s).min(sw - 20.0);
+        let h = 500.0 * s;
+        let x = sw * 0.5 - w * 0.5;
+        let y = sh * 0.5 - h * 0.5;
+        draw_rectangle(x, y, w, h, Color::new(0.0, 0.0, 0.0, 0.72));
+        draw_rectangle_lines(x, y, w, h, 2.0, Color::new(1.0, 0.69, 0.1, 0.5));
+        text_shadow("INVENTORY", x + 16.0 * s, y + 32.0 * s, 28.0 * s, HUD_COLOR);
+        text(
+            "I / ESC close   1-4 tabs   click an item to fit it",
+            x + w - 380.0 * s,
+            y + 28.0 * s,
+            15.0 * s,
+            Color::new(0.8, 0.8, 0.8, 1.0),
+        );
+
+        // Gun selector.
+        let p = &self.game.players[li];
+        let bh = 34.0 * s;
+        let mut yy = y + 48.0 * s;
+        let gw = (w - 48.0 * s) / 2.0;
+        for (i, slot) in [Slot::Primary, Slot::Secondary].into_iter().enumerate() {
+            let name = p.slot_weapon(slot).map(|w| w.def().name).unwrap_or("(empty)");
+            let label = format!("{}: {name}", if slot == Slot::Primary { "Primary" } else { "Secondary" });
+            let bx = x + 16.0 * s + (gw + 16.0 * s) * i as f32;
+            if self.inv_slot == slot {
+                draw_rectangle(bx, yy, gw, bh, Color::new(1.0, 0.69, 0.1, 0.3));
+            }
+            if ui.button(&label, bx, yy, gw, bh) {
+                self.inv_slot = slot;
+            }
+        }
+        yy += bh + 12.0 * s;
+
+        // Tabs.
+        let tw = (w - 32.0 * s) / 4.0;
+        for (i, name) in ATT_CATEGORIES.iter().enumerate() {
+            let bx = x + 16.0 * s + tw * i as f32;
+            let active = self.inv_tab == i;
+            draw_rectangle(bx, yy, tw - 4.0 * s, bh, Color::new(1.0, 0.69, 0.1, if active { 0.45 } else { 0.08 }));
+            if ui.button(&format!("{}. {name}", i + 1), bx, yy, tw - 4.0 * s, bh) {
+                self.inv_tab = i;
+            }
+        }
+        yy += bh + 10.0 * s;
+        draw_line(x + 16.0 * s, yy, x + w - 16.0 * s, yy, 1.0, Color::new(1.0, 0.69, 0.1, 0.5));
+        yy += 8.0 * s;
+
+        let p = &self.game.players[li];
+        let Some(wp) = p.slot_weapon(self.inv_slot).copied() else {
+            text_shadow("No gun in this slot", x + 24.0 * s, yy + 30.0 * s, 22.0 * s, GRAY);
+            return;
+        };
+        let cat = self.inv_tab;
+        let mounted = wp.att.get(cat);
+        let lw = w * 0.58;
+        let row = 40.0 * s;
+        // Default part first, then every item of this type.
+        let default_name = match cat {
+            0 => "Iron sights",
+            1 => "No muzzle",
+            2 => "Standard stock",
+            _ => "No grip",
+        };
+        let mut entries: Vec<(Option<AttItem>, String, String, usize)> =
+            vec![(None, default_name.to_string(), "always available".into(), 1)];
+        for it in AttItem::ALL.iter().filter(|a| a.category() == cat) {
+            let n = p.inventory.iter().filter(|x| *x == it).count();
+            entries.push((Some(*it), it.name().to_string(), it.desc().to_string(), n));
+        }
+        let mut choose = None;
+        for (item, name, desc, count) in entries {
+            let on = item == mounted;
+            let have = count > 0 || on;
+            let bx = x + 16.0 * s;
+            let hover =
+                ui.mouse.x >= bx && ui.mouse.x <= bx + lw && ui.mouse.y >= yy && ui.mouse.y <= yy + row - 4.0 * s;
+            let bg = if on {
+                Color::new(1.0, 0.69, 0.1, 0.35)
+            } else if hover && have {
+                Color::new(1.0, 1.0, 1.0, 0.12)
+            } else {
+                Color::new(0.0, 0.0, 0.0, 0.3)
+            };
+            draw_rectangle(bx, yy, lw, row - 4.0 * s, bg);
+            let c = item.map(|i| i.color()).unwrap_or([150, 150, 150]);
+            let a = if have { 1.0 } else { 0.25 };
+            draw_rectangle(
+                bx + 6.0 * s,
+                yy + 6.0 * s,
+                8.0 * s,
+                row - 16.0 * s,
+                Color::from_rgba(c[0], c[1], c[2], (a * 255.0) as u8),
+            );
+            let tc = if have { WHITE } else { Color::new(0.5, 0.5, 0.5, 1.0) };
+            let mut label = name.clone();
+            if item.is_some_and(|i| i.rare()) {
+                label += "  (rare)";
+            }
+            text_shadow(&label, bx + 22.0 * s, yy + 17.0 * s, 18.0 * s, tc);
+            text(&desc, bx + 22.0 * s, yy + 32.0 * s, 13.5 * s, Color::new(0.75, 0.75, 0.75, a));
+            let right = if on {
+                "FITTED".to_string()
+            } else if item.is_none() {
+                String::new()
+            } else if count > 0 {
+                format!("x{count}")
+            } else {
+                "not found".to_string()
+            };
+            text(&right, bx + lw - 90.0 * s, yy + 24.0 * s, 16.0 * s, if on { HUD_COLOR } else { tc });
+            if hover && ui.clicked && have && !on {
+                choose = Some(item);
+            }
+            yy += row;
+        }
+        if let Some(item) = choose {
+            self.game.mount(li, self.inv_slot, cat, item);
+        }
+
+        // The gun and its current setup.
+        let p = &self.game.players[li];
+        let wp = p.slot_weapon(self.inv_slot).copied().unwrap_or(wp);
+        let rx = x + 16.0 * s + lw + 20.0 * s;
+        let mut ry = y + 48.0 * s + bh * 2.0 + 40.0 * s;
+        text_shadow(wp.def().name, rx, ry, 24.0 * s, HUD_COLOR);
+        ry += 28.0 * s;
+        for (c, cat_name) in ATT_CATEGORIES.iter().enumerate() {
+            let n = wp.att.get(c).map(|i| i.name()).unwrap_or(match c {
+                0 => "Iron sights",
+                1 => "No muzzle",
+                2 => "Standard stock",
+                _ => "No grip",
+            });
+            text(&format!("{}: {n}", cat_name.trim_end_matches('s')), rx, ry, 16.0 * s, WHITE);
+            ry += 22.0 * s;
+        }
+        ry += 10.0 * s;
+        let m = wp.mods();
+        for l in [
+            format!("damage x{:.2}", m.damage),
+            format!("recoil x{:.2}", m.recoil),
+            format!("spread x{:.2}", m.spread),
+            format!("speed {:+.0}", m.speed),
+            if m.silenced { "silenced".to_string() } else { String::new() },
+        ] {
+            text(&l, rx, ry, 16.0 * s, Color::new(0.85, 0.85, 0.85, 1.0));
+            ry += 20.0 * s;
+        }
+        ry += 10.0 * s;
+        let total = p.inventory.len();
+        text(&format!("Carried, not fitted: {total}"), rx, ry, 15.0 * s, GRAY);
+        text(
+            "Find attachments on the map; the rare ones sit on the sky platforms.",
+            x + 16.0 * s,
+            y + h - 12.0 * s,
+            15.0 * s,
+            Color::new(0.8, 0.8, 0.8, 1.0),
+        );
     }
 
     fn draw_pause(&mut self) {
@@ -883,7 +1176,7 @@ impl App {
         }
         if self.show_move_panel {
             let px = (x + w + 40.0 * s).min(sw - 480.0 * s);
-            if movement_panel(&ui, &mut self.opts.settings.vars, px, sh * 0.34, 440.0 * s) {
+            if movement_panel(&ui, &mut self.opts.settings.vars, &mut self.num_edit, px, sh * 0.3, 440.0 * s) {
                 self.game.vars = self.opts.settings.vars;
                 self.game.settings.vars = self.opts.settings.vars;
                 self.opts.save();
@@ -1051,7 +1344,7 @@ impl App {
 
         if self.show_move_panel {
             let px = sw * 0.44 + 20.0 * s;
-            if movement_panel(&ui, &mut self.opts.settings.vars, px, 180.0 * s, 460.0 * s) {
+            if movement_panel(&ui, &mut self.opts.settings.vars, &mut self.num_edit, px, 180.0 * s, 460.0 * s) {
                 self.opts.save();
             }
             return;
@@ -1125,7 +1418,10 @@ async fn main() {
         fps_acc: 0.0,
         fps_frames: 0,
         was_alive: true,
-        buy_page: 0,
+        num_edit: NumEdit::default(),
+        inventory: false,
+        inv_tab: 0,
+        inv_slot: Slot::Primary,
         show_move_panel: false,
         menu_map_changed: false,
         editor: None,
@@ -1136,10 +1432,14 @@ async fn main() {
 
     // Screenshot mode: optionally start a match, fast forward and capture.
     if let Some(path) = args.shot.clone() {
-        if args.ui.as_deref() == Some("editor") {
+        if matches!(args.ui.as_deref(), Some("editor") | Some("editor4")) {
             app.open_editor();
             if let Some(ed) = app.editor.as_mut() {
-                ed.debug_select_first_ramp();
+                if args.ui.as_deref() == Some("editor4") {
+                    ed.debug_quad();
+                } else {
+                    ed.debug_select_first_ramp();
+                }
             }
             for frame in 0..3 {
                 clear_background(BLACK);
@@ -1218,7 +1518,7 @@ async fn main() {
         match args.ui.as_deref() {
             Some("buy") => app.buy_menu = true,
             Some("pause") => app.paused = true,
-            Some("attach") | Some("laser") | Some("rocket") => {
+            Some("attach") | Some("laser") | Some("rocket") | Some("ads") | Some("holo") => {
                 if let Some(li) = app.game.local {
                     use weapons::*;
                     let id = match args.ui.as_deref() {
@@ -1227,7 +1527,7 @@ async fn main() {
                         _ => WeaponId::Mp5,
                     };
                     let att = Attachments {
-                        sight: Sight::RedDot,
+                        sight: if args.ui.as_deref() == Some("holo") { Sight::Holo } else { Sight::RedDot },
                         muzzle: Muzzle::Suppressor,
                         stock: Stock::Light,
                         grip: Grip::Vertical,
@@ -1236,9 +1536,18 @@ async fn main() {
                     p.primary = Some(Weapon::with(id, att));
                     p.active = Slot::Primary;
                     p.deploy_time = -10.0;
+                    p.inventory = vec![
+                        AttItem::Sight(Sight::Holo),
+                        AttItem::Sight(Sight::Acog),
+                        AttItem::Sight(Sight::Holo),
+                        AttItem::Grip(Grip::Angled),
+                    ];
                     if args.ui.as_deref() == Some("attach") {
-                        app.buy_menu = true;
-                        app.buy_page = 1;
+                        app.inventory = true;
+                    }
+                    if matches!(args.ui.as_deref(), Some("ads") | Some("holo")) {
+                        p.zoom = 1;
+                        app.renderer.ads = 1.0;
                     }
                 }
             }

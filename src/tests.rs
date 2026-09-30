@@ -40,7 +40,9 @@ fn walks_and_jumps() {
 #[test]
 fn surfs_a_ramp() {
     let m = map::load("surf_wars");
-    let vars = MoveVars::surf_server();
+    // stock ramp behaviour: with a raised ramp climb, holding into the ramp
+    // climbs over the ridge (see ramp_climb_lifts_surfers)
+    let vars = MoveVars { ramp_climb: 30.0, ..MoveVars::surf_server() };
     // inner face of the north lane faces -y, ridge at y=1100
     let mut s = PmState::new(vec3(-3300.0, 850.0, 1850.0));
     s.velocity = vec3(400.0, 0.0, 0.0);
@@ -687,4 +689,244 @@ fn editor_build_save_play() {
         g.events.clear();
     }
     assert!(moved > 10000.0, "bots barely moved on an editor map: {moved}");
+}
+
+/// Holding into a ramp climbs it only with a raised ramp climb cap.
+#[test]
+fn ramp_climb_lifts_surfers() {
+    let m = map::load("surf_wars");
+    let mut gains = Vec::new();
+    for climb in [30.0, 100.0, 160.0] {
+        let vars = MoveVars { ramp_climb: climb, ..MoveVars::surf_server() };
+        let mut s = PmState::new(vec3(-3300.0, 850.0, 1850.0));
+        s.velocity = vec3(900.0, 0.0, 0.0);
+        for _ in 0..250 {
+            let cmd = UserCmd { msec: 10, sidemove: -400.0, ..Default::default() };
+            step(&m.world, &vars, &mut s, cmd);
+        }
+        // height relative to the ridge line after gliding down the lane
+        let h = s.origin.z - map::sw_ridge(s.origin.x);
+        println!("ramp_climb {climb}: height over ridge {h:.0}, final {:?} vel {:?}", s.origin, s.velocity);
+        gains.push(h);
+    }
+    assert!(gains[1] > gains[0] + 60.0, "{gains:?}");
+    assert!(gains[2] > gains[1], "{gains:?}");
+}
+
+/// Scripted surfer: look along `yaw` and hold into whatever ramp we touch.
+fn surf_cmd(s: &PmState, yaw: f32) -> UserCmd {
+    let mut cmd = UserCmd { msec: 10, viewangles: vec3(0.0, yaw, 0.0), ..Default::default() };
+    if s.surf_time < 0.3 {
+        let n = s.surf_normal;
+        let wish = -vec3(n.x, n.y, 0.0).normalize_or_zero();
+        let (_, r, _) = angle_vectors(cmd.viewangles);
+        cmd.sidemove = 400.0 * wish.dot(r).signum();
+    }
+    cmd
+}
+
+fn solo_game(map: &str) -> crate::game::Game {
+    use crate::game::*;
+    let s = Settings {
+        map: map.into(),
+        player_team: Some(crate::map::Team::T),
+        bots_t: 0,
+        bots_ct: 0,
+        mode: Mode::Deathmatch,
+        ..Default::default()
+    };
+    let mut s = s;
+    if let Some(c) = std::env::var("RAMP_CLIMB").ok().and_then(|v| v.parse().ok()) {
+        s.vars.ramp_climb = c;
+    }
+    Game::new(s, 3)
+}
+
+/// Every sky ramp: the launch pad throws you onto the ramp, the boosters
+/// carry you up, and you land on the sky platform.
+#[test]
+fn sky_ramps_reach_platforms() {
+    for name in map::BUILTIN_MAPS {
+        let g0 = solo_game(name);
+        let skies = g0.map.sky.clone();
+        assert!(skies.len() == 2, "{name} has {} sky ramps", skies.len());
+        for (k, sky) in skies.iter().enumerate() {
+            let mut g = solo_game(name);
+            g.players[0].pm = PmState::new(sky.pad + vec3(0.0, 0.0, 38.0));
+            let yaw = if sky.dir > 0.0 { 0.0 } else { 180.0 };
+            let mut reached = None;
+            let mut maxz = 0.0f32;
+            let mut max_speed = 0.0f32;
+            let mut last = Vec3::ZERO;
+            for t in 0..3000 {
+                let cmd = surf_cmd(&g.players[0].pm, yaw);
+                g.step(Some(cmd));
+                g.events.clear();
+                let p = &g.players[0].pm;
+                maxz = maxz.max(p.origin.z);
+                max_speed = max_speed.max(p.velocity.length());
+                let feet = p.origin + vec3(0.0, 0.0, p.mins().z);
+                let pl = sky.platform;
+                if p.onground
+                    && feet.x >= pl.mins.x - 16.0
+                    && feet.x <= pl.maxs.x + 16.0
+                    && feet.y >= pl.mins.y - 16.0
+                    && feet.y <= pl.maxs.y + 16.0
+                    && (feet.z - pl.maxs.z).abs() < 4.0
+                {
+                    reached = Some(t as f32 * 0.01);
+                    break;
+                }
+                if t % 100 == 0 && std::env::var("SKYLOG").is_ok() {
+                    println!(
+                        "  t={:.1} pos={:.0?} vel={:.0?} surf={}",
+                        t as f32 * 0.01,
+                        p.origin,
+                        p.velocity,
+                        p.is_surfing()
+                    );
+                }
+                last = p.origin;
+            }
+            println!(
+                "{name} sky {k}: reached={reached:?} max_z={maxz:.0} max_speed={max_speed:.0} platform_top={:.0} last={last:.0?}",
+                sky.platform.maxs.z
+            );
+            assert!(reached.is_some(), "{name} sky ramp {k} does not reach its platform");
+        }
+    }
+}
+
+/// Spawn launch pads throw you onto a ramp.
+#[test]
+fn spawn_launchers_land_on_ramps() {
+    for name in map::BUILTIN_MAPS {
+        let g0 = solo_game(name);
+        let sky_pads: Vec<Vec3> = g0.map.sky.iter().map(|s| s.pad).collect();
+        let pads: Vec<Vec3> = g0
+            .map
+            .boosters
+            .iter()
+            .filter(|b| matches!(b.push, crate::map::Push::Launch { .. }))
+            .map(|b| b.pad())
+            .filter(|p| !sky_pads.iter().any(|q| q.distance(*p) < 1.0))
+            .collect();
+        assert!(!pads.is_empty(), "{name} has no spawn launch pads");
+        for pad in pads {
+            let mut g = solo_game(name);
+            g.players[0].pm = PmState::new(pad + vec3(0.0, 0.0, 38.0));
+            let mut surfed = 0;
+            let mut teleported = false;
+            for _ in 0..400 {
+                let pm = g.players[0].pm;
+                let yaw = pm.velocity.y.atan2(pm.velocity.x).to_degrees();
+                g.step(Some(surf_cmd(&pm, yaw)));
+                if g.events.iter().any(|e| matches!(e, crate::game::Event::Teleport { .. })) {
+                    teleported = true;
+                }
+                g.events.clear();
+                if g.players[0].pm.is_surfing() {
+                    surfed += 1;
+                }
+                if std::env::var("PADLOG").is_ok() && g.tick % 25 == 0 {
+                    let p = &g.players[0].pm;
+                    println!("  pos={:.0?} vel={:.0?} surf={}", p.origin, p.velocity, p.is_surfing());
+                }
+            }
+            println!("{name} pad {pad:.0?}: surfed {surfed} ticks, teleported {teleported}");
+            assert!(surfed > 30 && !teleported, "{name} pad {pad:?}");
+        }
+    }
+}
+
+/// Gizmo and 2D view drags move and resize on the grid; boosters and launch
+/// pads survive a save and load.
+#[test]
+fn editor_drags_and_boosters() {
+    use crate::editor::Editor;
+    use macroquad::math::vec2;
+    let mut ed = Editor::new(None);
+    ed.look_from(vec3(0.0, -1500.0, 2600.0), vec3(35.0, 90.0, 0.0));
+    ed.add_shape("box");
+    let (a0, b0) = ed.bounds().unwrap();
+    // gizmo drag along Z by 70 units snaps to 64 (grid 32)
+    ed.drag_axis(2, 70.0);
+    let (a1, _) = ed.bounds().unwrap();
+    assert!((a1.z - a0.z - 64.0).abs() < 0.5, "{a0} -> {a1}");
+    // drag the +X / +Y corner handle of the top view by (100, 50)
+    ed.drag_top_handle(1, 1, vec2(100.0, 50.0));
+    let (a2, b2) = ed.bounds().unwrap();
+    assert!((a2.x - a0.x).abs() < 0.5 && (a2.y - a0.y).abs() < 0.5, "min corner moved");
+    assert!((b2.x % 32.0).abs() < 0.5 && (b2.y % 32.0).abs() < 0.5, "not on the grid: {b2}");
+    assert!(b2.x > b0.x + 60.0 && b2.y > b0.y + 30.0, "{b0} -> {b2}");
+    // dragging the min edge past the max edge keeps one grid step
+    ed.drag_top_handle(-1, 0, vec2(5000.0, 0.0));
+    let (a3, b3) = ed.bounds().unwrap();
+    assert!((b3.x - a3.x - 32.0).abs() < 0.5, "{a3} {b3}");
+
+    ed.add_boost(false);
+    ed.resize_sel(0, 64.0);
+    ed.rotate_sel(90.0);
+    ed.restyle_sel(false);
+    ed.add_boost(true);
+    ed.resize_sel(0, 100.0);
+    ed.drag_axis(0, 128.0);
+    let text = crate::mapfile::to_text(&ed.game.map);
+    let m = crate::mapfile::from_text(&text).unwrap();
+    assert_eq!(m.boosters.len(), 2);
+    for (x, y) in m.boosters.iter().zip(ed.game.map.boosters.iter()) {
+        assert!((x.zone.mins - y.zone.mins).length() < 0.5);
+        assert_eq!(format!("{:?}", x.push).len() > 0, true);
+    }
+    assert!(matches!(m.boosters[0].push, crate::map::Push::Boost { two_way: true, .. }));
+    assert!(matches!(m.boosters[1].push, crate::map::Push::Launch { .. }));
+}
+
+/// Attachments come from map pickups into the inventory, get fitted and
+/// come back to the inventory when the gun is lost.
+#[test]
+fn attachment_inventory() {
+    use crate::game::*;
+    use crate::map::PickupKind;
+    use crate::weapons::*;
+    let mut g = solo_game("surf_wars");
+    g.give(0, WeaponId::Mp5);
+    let k = g
+        .pickups
+        .iter()
+        .position(|p| matches!(p.def.kind, PickupKind::Attachment(AttItem::Sight(Sight::RedDot))))
+        .expect("red dot on the map");
+    let pos = g.pickups[k].def.pos;
+    g.players[0].pm = PmState::new(pos - vec3(0.0, 0.0, 30.0));
+    g.step(Some(UserCmd { msec: 10, ..Default::default() }));
+    let p = &g.players[0];
+    // fitted straight onto the MP5 in hand
+    assert_eq!(p.primary.unwrap().att.sight, Sight::RedDot, "inventory {:?}", p.inventory);
+    assert!(p.inventory.is_empty());
+    assert!(g.pickups[k].available_at > g.time);
+    // ADS instead of a scope
+    let w = p.primary.unwrap();
+    assert!(w.ads_view(1) && !w.scope_view(1));
+
+    // can't fit what you don't have
+    assert!(!g.mount(0, Slot::Primary, 0, Some(AttItem::Sight(Sight::Acog))));
+    g.players[0].inventory.push(AttItem::Sight(Sight::Acog));
+    assert!(g.mount(0, Slot::Primary, 0, Some(AttItem::Sight(Sight::Acog))));
+    let p = &g.players[0];
+    assert_eq!(p.inventory, vec![AttItem::Sight(Sight::RedDot)]);
+    assert!(p.primary.unwrap().scope_view(1), "the ACOG is a scope");
+    // back to iron sights
+    assert!(g.mount(0, Slot::Primary, 0, None));
+    assert_eq!(g.players[0].inventory.len(), 2);
+    assert!(g.mount(0, Slot::Primary, 0, Some(AttItem::Sight(Sight::Holo))) == false);
+
+    // dropping the gun returns its parts; buying again refits them
+    assert!(g.mount(0, Slot::Primary, 0, Some(AttItem::Sight(Sight::RedDot))));
+    g.players[0].active = Slot::Primary;
+    g.drop_weapon(0);
+    assert_eq!(g.players[0].inventory.len(), 2);
+    assert!(g.dropped.last().unwrap().weapon.att == Attachments::default());
+    g.give(0, WeaponId::Mp5);
+    assert_eq!(g.players[0].primary.unwrap().att.sight, Sight::RedDot);
+    assert_eq!(g.players[0].inventory, vec![AttItem::Sight(Sight::Acog)]);
 }
