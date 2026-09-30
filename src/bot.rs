@@ -524,7 +524,8 @@ fn weapons(g: &Game, i: usize, b: &mut BotBrain, cmd: &mut UserCmd, visible: boo
     }
 
     // Scoping.
-    if !def.zoom_fov.is_empty() && p.pm.onground && dist > 450.0 && p.zoom == 0 && p.resume_zoom.is_none() {
+    let sniper = p.weapon().is_some_and(|w| w.is_sniper() && w.zoom_levels() > 0);
+    if sniper && p.pm.onground && dist > 450.0 && p.zoom == 0 && p.resume_zoom.is_none() {
         if p.prev_buttons & IN_ATTACK2 == 0 && now >= p.next_attack {
             cmd.buttons |= IN_ATTACK2;
         }
@@ -533,7 +534,7 @@ fn weapons(g: &Game, i: usize, b: &mut BotBrain, cmd: &mut UserCmd, visible: boo
     // Aim down a zoom sight at range when it pays off (the ACOG slows us
     // down, so only use it when not surfing hard).
     if let Some(w) = p.weapon() {
-        let ads_ok = mods.zoom.is_some() && def.zoom_fov.is_empty() && (mods.ads_speed == 0.0 || speed < 400.0);
+        let ads_ok = !mods.zooms.is_empty() && !w.is_sniper() && (mods.ads_speed == 0.0 || speed < 400.0);
         if ads_ok && dist > 650.0 && p.zoom == 0 && w.zoom_levels() > 0 && p.prev_buttons & IN_ATTACK2 == 0 {
             cmd.buttons |= IN_ATTACK2;
         }

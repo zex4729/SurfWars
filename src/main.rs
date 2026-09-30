@@ -329,7 +329,10 @@ fn movement_panel(ui: &Ui, vars: &mut MoveVars, edit: &mut NumEdit, x: f32, y: f
         *slot = x;
         c
     };
-    // keyboard input for the focused box
+    // keyboard input for the focused box (keys typed elsewhere are dropped)
+    if edit.field.is_none() {
+        while get_char_pressed().is_some() {}
+    }
     if let Some(f) = edit.field {
         while let Some(c) = get_char_pressed() {
             if (c.is_ascii_digit() || c == '.' || c == '-') && edit.text.len() < 9 {
@@ -453,6 +456,8 @@ struct App {
     spec_target: usize,
     spec_first_person: bool,
     wheel_jumps: u32,
+    /// Scrolling up ducks until this game time (a short tap per notch).
+    wheel_duck_until: f64,
     wheel_pressed_last: bool,
     menu_cam_target: usize,
     menu_cam_switch: f64,
@@ -627,7 +632,7 @@ impl App {
         if jump {
             cmd.buttons |= IN_JUMP;
         }
-        if is_key_down(KeyCode::LeftControl) || is_key_down(KeyCode::C) {
+        if is_key_down(KeyCode::LeftControl) || is_key_down(KeyCode::C) || self.game.time < self.wheel_duck_until {
             cmd.buttons |= IN_DUCK;
         }
         if !self.buy_menu && !self.inventory {
@@ -650,8 +655,12 @@ impl App {
     fn handle_keys(&mut self) {
         let Some(li) = self.game.local else { return };
         let (_, wy) = mouse_wheel();
-        if wy != 0.0 && !self.paused {
+        // the classic surf / bhop binds: wheel down jumps, wheel up ducks
+        if wy < 0.0 && !self.paused {
             self.wheel_jumps = (self.wheel_jumps + 1).min(3);
+        } else if wy > 0.0 && !self.paused {
+            self.wheel_duck_until = self.wheel_duck_until.max(self.game.time) + 0.15;
+            self.wheel_duck_until = self.wheel_duck_until.min(self.game.time + 0.45);
         }
         if is_key_pressed(KeyCode::V) {
             self.third_person = !self.third_person;
@@ -1101,12 +1110,7 @@ impl App {
         let lw = w * 0.58;
         let row = 40.0 * s;
         // Default part first, then every item of this type.
-        let default_name = match cat {
-            0 => "Iron sights",
-            1 => "No muzzle",
-            2 => "Standard stock",
-            _ => "No grip",
-        };
+        let default_name = wp.default_part_name(cat);
         let mut entries: Vec<(Option<AttItem>, String, String, usize)> =
             vec![(None, default_name.to_string(), "always available".into(), 1)];
         for it in AttItem::ALL.iter().filter(|a| a.category() == cat) {
@@ -1116,7 +1120,8 @@ impl App {
         let mut choose = None;
         for (item, name, desc, count) in entries {
             let on = item == mounted;
-            let have = count > 0 || on;
+            let fits = item.is_none_or(|it| wp.fits(it));
+            let have = (count > 0 || on) && fits;
             let bx = x + 16.0 * s;
             let hover =
                 ui.mouse.x >= bx && ui.mouse.x <= bx + lw && ui.mouse.y >= yy && ui.mouse.y <= yy + row - 4.0 * s;
@@ -1148,6 +1153,8 @@ impl App {
                 "FITTED".to_string()
             } else if item.is_none() {
                 String::new()
+            } else if !fits {
+                "won't fit".to_string()
             } else if count > 0 {
                 format!("x{count}")
             } else {
@@ -1171,12 +1178,7 @@ impl App {
         text_shadow(wp.def().name, rx, ry, 24.0 * s, HUD_COLOR);
         ry += 28.0 * s;
         for (c, cat_name) in ATT_CATEGORIES.iter().enumerate() {
-            let n = wp.att.get(c).map(|i| i.name()).unwrap_or(match c {
-                0 => "Iron sights",
-                1 => "No muzzle",
-                2 => "Standard stock",
-                _ => "No grip",
-            });
+            let n = wp.att.get(c).map(|i| i.name()).unwrap_or(wp.default_part_name(c));
             text(&format!("{}: {n}", cat_name.trim_end_matches('s')), rx, ry, 16.0 * s, WHITE);
             ry += 22.0 * s;
         }
@@ -1511,6 +1513,7 @@ async fn main() {
         spec_target: 0,
         spec_first_person: false,
         wheel_jumps: 0,
+        wheel_duck_until: 0.0,
         wheel_pressed_last: false,
         menu_cam_target: 0,
         menu_cam_switch: 0.0,
@@ -1620,7 +1623,7 @@ async fn main() {
         match args.ui.as_deref() {
             Some("buy") => app.buy_menu = true,
             Some("pause") => app.paused = true,
-            Some("attach") | Some("laser") | Some("rocket") | Some("ads") | Some("holo") => {
+            Some("attach") | Some("laser") | Some("rocket") | Some("ads") | Some("holo") | Some("scope2x") => {
                 if let Some(li) = app.game.local {
                     use weapons::*;
                     let id = match args.ui.as_deref() {
@@ -1648,6 +1651,13 @@ async fn main() {
                         app.inventory = true;
                     }
                     if matches!(args.ui.as_deref(), Some("ads") | Some("holo")) {
+                        p.zoom = 1;
+                        app.renderer.ads = 1.0;
+                    }
+                    if args.ui.as_deref() == Some("scope2x") {
+                        let att = Attachments { sight: Sight::Scope2x, ..Default::default() };
+                        p.secondary = Some(Weapon::with(WeaponId::Usp, att));
+                        p.active = Slot::Secondary;
                         p.zoom = 1;
                         app.renderer.ads = 1.0;
                     }

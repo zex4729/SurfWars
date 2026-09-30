@@ -25,3 +25,9 @@ opt-level = 3
 debug = false
 lto = "thin"
 codegen-units = 4
+
+# quad-snd 0.2.8 prints "Underrun occured" on every ALSA underrun and "Audio
+# thread died" on every sound call without a sound device, which floods the
+# terminal. The vendored copy is identical except for those prints.
+[patch.crates-io]
+quad-snd = { path = "vendor/quad-snd" }

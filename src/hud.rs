@@ -238,6 +238,17 @@ fn draw_reticle(sight: crate::weapons::Sight, sw: f32, sh: f32, s: f32) {
     let cx = (sw * 0.5).floor();
     let cy = (sh * 0.5).floor();
     match sight {
+        crate::weapons::Sight::Scope2x => {
+            // fine duplex crosshair with a dark ring, like a small scope
+            let c = Color::new(0.05, 0.05, 0.05, 0.9);
+            let r = 26.0 * s;
+            draw_circle_lines(cx, cy, r, 3.0 * s, Color::new(0.0, 0.0, 0.0, 0.45));
+            draw_line(cx - r, cy, cx - 4.0 * s, cy, 1.4 * s, c);
+            draw_line(cx + 4.0 * s, cy, cx + r, cy, 1.4 * s, c);
+            draw_line(cx, cy + 4.0 * s, cx, cy + r, 1.4 * s, c);
+            draw_line(cx, cy - r, cx, cy - 4.0 * s, 1.4 * s, c);
+            draw_circle(cx, cy, 1.4 * s, Color::new(1.0, 0.2, 0.1, 0.9));
+        }
         crate::weapons::Sight::Holo => {
             let c = Color::new(0.35, 1.0, 0.45, 0.9);
             draw_circle_lines(cx, cy, 16.0 * s, 1.6 * s, c);

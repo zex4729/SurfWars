@@ -924,6 +924,20 @@ impl Renderer {
             let at = pk.def.pos + vec3(0.0, 0.0, bob);
             let base = Mat4::from_translation(at) * Mat4::from_rotation_z(spin);
             match pk.def.kind {
+                crate::map::PickupKind::Ammo => {
+                    let olive = vec3(0.3, 0.34, 0.2);
+                    self.solid.cube(&(base * Mat4::from_scale(vec3(20.0, 12.0, 10.0))), olive);
+                    self.solid.cube(
+                        &(base * Mat4::from_translation(vec3(0.0, 0.0, 5.2)) * Mat4::from_scale(vec3(20.4, 12.4, 1.2))),
+                        vec3(0.2, 0.22, 0.14),
+                    );
+                    for k in 0..4 {
+                        let x = -6.0 + k as f32 * 4.0;
+                        let m =
+                            base * Mat4::from_translation(vec3(x, 0.0, 8.0)) * Mat4::from_scale(vec3(1.6, 1.6, 5.0));
+                        self.solid.cube(&m, vec3(0.85, 0.65, 0.25));
+                    }
+                }
                 crate::map::PickupKind::Health => {
                     self.solid.cube(&(base * Mat4::from_scale(vec3(16.0, 16.0, 12.0))), vec3(0.92, 0.92, 0.92));
                     let red = vec3(0.85, 0.08, 0.08);
@@ -932,7 +946,7 @@ impl Renderer {
                 }
                 crate::map::PickupKind::Weapon(id) => {
                     let m = base * Mat4::from_scale(Vec3::splat(1.3)) * Mat4::from_translation(vec3(-4.0, 0.0, 0.0));
-                    draw_weapon_model(&mut self.solid, id, crate::weapons::Attachments::default(), &m);
+                    draw_weapon_model(&mut self.solid, id, crate::weapons::Weapon::default_att(id), &m);
                 }
                 crate::map::PickupKind::Attachment(item) => {
                     draw_attachment_model(&mut self.solid, item, &(base * Mat4::from_scale(Vec3::splat(3.0))));
@@ -1009,6 +1023,7 @@ impl Renderer {
             if pk.available_at <= game.time {
                 let (c, size) = match pk.def.kind {
                     crate::map::PickupKind::Health => ([80, 255, 120, 110], 34.0),
+                    crate::map::PickupKind::Ammo => ([255, 230, 120, 90], 30.0),
                     crate::map::PickupKind::Weapon(_) => ([255, 210, 80, 130], 34.0),
                     crate::map::PickupKind::Attachment(a) if a.rare() => ([255, 120, 255, 170], 46.0),
                     crate::map::PickupKind::Attachment(a) => {
@@ -1389,6 +1404,7 @@ fn sight_line(id: WeaponId, sight: crate::weapons::Sight) -> f32 {
     match sight {
         Sight::RedDot => top + 1.0,
         Sight::Holo => top + 1.4,
+        Sight::Scope2x => top + 1.1,
         _ => top + 0.6,
     }
 }
@@ -1407,6 +1423,12 @@ pub fn draw_attachment_model(b: &mut Batch, item: crate::weapons::AttItem, m: &M
             part(vec3(0.0, 0.0, 0.0), vec3(2.6, 1.4, 1.6), black);
             part(vec3(-1.2, 0.0, 0.1), vec3(0.3, 0.8, 0.8), vec3(1.0, 0.1, 0.1));
             part(vec3(0.0, 0.0, -1.0), vec3(3.0, 1.6, 0.4), dark);
+        }
+        AttItem::Sight(Sight::Scope2x) => {
+            part(vec3(0.0, 0.0, 0.0), vec3(3.6, 1.3, 1.3), black);
+            part(vec3(1.9, 0.0, 0.0), vec3(0.3, 1.6, 1.6), dark);
+            part(vec3(-1.9, 0.0, 0.0), vec3(0.3, 1.6, 1.6), dark);
+            part(vec3(0.0, 0.0, -1.0), vec3(2.4, 1.0, 0.6), dark);
         }
         AttItem::Sight(Sight::Holo) => {
             part(vec3(0.0, 0.0, -0.4), vec3(3.4, 2.0, 0.8), black);
@@ -1479,7 +1501,10 @@ pub fn draw_weapon_model(b: &mut Batch, id: WeaponId, att: crate::weapons::Attac
         WeaponId::Awp => {
             part(vec3(3.0, 0.0, 1.4), vec3(16.0, 2.6, 3.0), green);
             part(vec3(20.0, 0.0, 1.8), vec3(20.0, 1.1, 1.1), black);
-            part(vec3(3.0, 0.0, 4.6), vec3(12.0, 2.0, 2.0), black);
+            if att.sight == crate::weapons::Sight::Scope8x {
+                part(vec3(3.0, 0.0, 4.6), vec3(12.0, 2.0, 2.0), black);
+                part(vec3(9.2, 0.0, 4.6), vec3(0.6, 2.4, 2.4), dark);
+            }
             part(vec3(-9.0, 0.0, 0.2), vec3(12.0, 2.4, 4.0), green);
             part(vec3(4.0, 0.0, -2.0), vec3(2.4, 1.4, 3.2), black);
         }
@@ -1507,11 +1532,23 @@ pub fn draw_weapon_model(b: &mut Batch, id: WeaponId, att: crate::weapons::Attac
     // Attachments.
     let tip = muzzle_tip(id);
     let top = if id == WeaponId::Rocket { 5.3 } else { 3.2 };
-    let scoped = matches!(id, WeaponId::Scout | WeaponId::Awp);
+    // the Scout keeps its own scope; the AWP's 8x is part of its model
+    let scoped = id == WeaponId::Scout;
     use crate::weapons::{Grip, Muzzle, Sight, Stock};
     if !scoped {
         match att.sight {
-            Sight::Iron => {}
+            Sight::Iron | Sight::Scope8x => {}
+            Sight::Scope2x => {
+                // a short tube you can look through when aiming
+                let c = top + 1.1;
+                part(vec3(3.0, 0.0, top + 0.2), vec3(1.2, 1.0, 0.4), black);
+                part(vec3(3.0, 0.0, c - 0.62), vec3(3.6, 1.3, 0.16), black);
+                part(vec3(3.0, 0.0, c + 0.62), vec3(3.6, 1.3, 0.16), black);
+                part(vec3(3.0, 0.62, c), vec3(3.6, 0.16, 1.3), black);
+                part(vec3(3.0, -0.62, c), vec3(3.6, 0.16, 1.3), black);
+                part(vec3(4.9, 0.0, c + 0.72), vec3(0.3, 1.5, 0.2), dark);
+                part(vec3(4.9, 0.0, c - 0.72), vec3(0.3, 1.5, 0.2), dark);
+            }
             Sight::RedDot => {
                 // an open tube you look through: base, two sides and a top
                 let c = top + 1.0;

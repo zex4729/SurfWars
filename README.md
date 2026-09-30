@@ -9,15 +9,17 @@ classic CS arsenal.
 
 | | |
 |---|---|
-| ![First person](docs/first_person.png) | ![surf_canyon](docs/canyon.png) |
-| ![Overview of surf_wars](docs/overview.png) | ![surf_hairpin](docs/hairpin.png) |
-| ![Map editor, four views](docs/editor.png) | ![Attachment inventory](docs/inventory.png) |
-| ![Sky ramp](docs/sky_ramp.png) | ![Sky platform with rare attachments](docs/sky_platform.png) |
-| ![Booster chevrons](docs/boosters.png) | ![Launch pads at the spawn](docs/launch_pads.png) |
-| ![Red dot, aimed down the sight](docs/ads.png) | ![Damage numbers](docs/damage.png) |
-| ![surf_ski](docs/ski.png) | ![surf_utopia](docs/utopia.png) |
-| ![Editor face tool](docs/editor_face.png) | ![Editor clip tool](docs/editor_clip.png) |
-| ![Editor bot paths](docs/editor_paths.png) | ![Forest scenery](docs/scenery_forest.png) |
+| ![First person on surf_canyon](docs/first_person.png) | ![surf_wars](docs/surf_wars.png) |
+| ![surf_canyon](docs/surf_canyon.png) | ![surf_hairpin](docs/surf_hairpin.png) |
+| ![surf_ski](docs/surf_ski.png) | ![surf_utopia](docs/surf_utopia.png) |
+| ![surf_odyssey from afar](docs/surf_odyssey.png) | ![The surf_odyssey double helix](docs/odyssey_helix.png) |
+| ![A surf_odyssey castle](docs/odyssey_castle.png) | ![A bare sky platform and its hidden pad](docs/sky_platform.png) |
+| ![AWP 8x scope](docs/awp_8x.png) | ![Pistol with the 2x scope](docs/pistol_2x.png) |
+| ![Red dot, aimed down the sight](docs/red_dot.png) | ![Damage numbers](docs/damage.png) |
+| ![Attachment inventory](docs/inventory.png) | ![Movement settings](docs/movement.png) |
+| ![Map editor, four views](docs/editor.png) | ![Editor face tool](docs/editor_face.png) |
+| ![Editor clip tool](docs/editor_clip.png) | ![Editor drop down menu](docs/editor_drop.png) |
+| ![Editor bot paths](docs/editor_paths.png) | |
 
 ## Features
 
@@ -44,25 +46,26 @@ classic CS arsenal.
   them up to a set speed (some lanes have two way boosters in the valley,
   the hairpin straights push the way the track runs). Orange launch pads at
   the front of each spawn throw you onto the lanes at speed.
-- **Sky platforms**: each team has a pink sky ramp outside the map. A launch
-  pad on the spawn's side bridge throws you onto it, three boosters carry you
-  up, and at the top a platform far above everything else holds the rare
-  attachments (ACOG, holographic sight, suppressor). You can only get there
-  by surfing.
+- **Sky platforms**: bare slabs floating high above surf_wars, surf_canyon
+  and surf_hairpin (and the top of the surf_odyssey tower) hold the rare
+  attachments (ACOG, holographic sight, suppressor). No walls, no ramp up:
+  finding the way there is up to you.
 - **Hover boards**: every player gets a glowing board under their feet
   while they touch a surf ramp, with a team coloured trail at speed.
 - **Weapons**: USP, MP5 Navy, M3 shotgun, AK-47, Scout and AWP (plus the
   knife) with CS 1.6 damage, fire rate, magazine sizes, reload times,
   movement speeds, spread formulas, recoil (`KickBack`), armor penetration,
-  range falloff and hitbox multipliers. Scopes have two zoom levels. The buy
+  range falloff and hitbox multipliers. The Scout keeps its two zoom levels;
+  the AWP comes with an 8x scope that you can swap for another sight. The buy
   menu only sells the USP, M3 and MP5; the AK-47, Scout and AWP are map
   pickups in hard to reach places.
 - **Laser rifle and rocket launcher**: only available when you place them
   with the map editor. The laser is a dead accurate hitscan beam; rockets
   are projectiles with splash damage and knockback, so rocket jumps work.
-- **Weapon attachments**: sights (red dot and holographic aim down the
-  sight on Mouse 2: the gun comes up to your eye and you look through the
-  sight's reflex reticle; the 4x ACOG is a scope), muzzles (suppressor,
+- **Weapon attachments**: sights (red dot, holographic and the 2x scope aim
+  down the sight on Mouse 2: the gun comes up to your eye and you look
+  through the sight's reticle; the 4x ACOG is a scope and doesn't fit the
+  pistol, the 2x does; taking a sight off the AWP puts its 8x scope back), muzzles (suppressor,
   compensator, long barrel), stocks (light, heavy) and grips (vertical,
   angled, stubby). Each changes spread, recoil, damage, speed, reload or
   draw time, and every one of them also cuts damage falloff, so guns hit
@@ -76,10 +79,13 @@ classic CS arsenal.
   new gun of the same type gets your last setup refitted. Bots get random
   attachments and adjust their firing range, burst length and scope use to
   them.
+- **Ammo drops**: every player who dies drops an ammo box where they fell
+  (or where they died, if that was in mid air): one magazine for each of your
+  guns. It disappears after 30 seconds.
 - **Damage numbers**: every hit you land shows the damage over the target
   (hits in quick succession add up; yellow for headshots, red with KILL).
-- **Map pickups**: weapon spawners, attachments and health packs (+50 HP)
-  that respawn after a while. Walk into a weapon to pick it up, or press E to
+- **Map pickups**: weapon spawners, attachments, health packs (+50 HP) and
+  ammo boxes (fill both guns) that respawn after a while. Walk into a weapon to pick it up, or press E to
   swap it for the gun you are holding.
 - **Two teams, rounds or deathmatch**: CS style elimination rounds with
   freeze time, round timer, scores and a free buy menu in spawn; or
@@ -89,7 +95,7 @@ classic CS arsenal.
   ramps with perpendicular air strafes, bunny hop pillars with landing
   prediction, and fight with reaction times, tracking, recoil control and
   burst fire. Four difficulty levels.
-- **Five maps** made of ramps with bunny hop sections. All bunny hop
+- **Six maps** made of ramps with bunny hop sections. All bunny hop
   pillars are level, so you can hop back the way you came.
   - `surf_wars`: two long V shaped surf lanes between the spawns, a high
     middle island reached over pillars (with tiny-pillar perches holding an
@@ -114,6 +120,14 @@ classic CS arsenal.
     one onto the next, down to a floating arena in the middle. Falling off a
     stage teleports you back to the start of that stage, like the
     checkpoint teleports on the real map.
+
+  - `surf_odyssey` (huge: over four times the area of surf_hairpin): each
+    team starts in a castle at the far end of a night sky, surfs a 12000 unit
+    boosted express ramp and a 90 degree turn into a double helix (the two
+    teams' spirals are interleaved) that winds one and a half times around a
+    giant tower, and lands in a round arena at its foot. Launch pads throw
+    you out to four floating islands with AKs, Scouts and attachments, and
+    back. The rare parts and an AWP wait on top of the tower.
 
   The two classics are recreated by hand from their layout and feel (the
   game has no BSP loader and ships no map files), scaled to this game's
@@ -165,7 +179,8 @@ the game. On a machine without a sound device, start it with `--no-audio`.
 | Key | Action |
 |---|---|
 | W A S D | move |
-| Space / mouse wheel | jump (the wheel is the classic bunny hop bind) |
+| Space / mouse wheel down | jump (the wheel is the classic bunny hop bind) |
+| mouse wheel up | duck (a short duck per notch) |
 | Ctrl / C | duck |
 | Shift | walk |
 | Mouse 1 | fire |

@@ -310,7 +310,7 @@ pub fn clone_map(m: &Map) -> Map {
 }
 
 fn pickup_kinds() -> Vec<PickupKind> {
-    let mut v = vec![PickupKind::Health];
+    let mut v = vec![PickupKind::Health, PickupKind::Ammo];
     v.extend(ALL_PICKUP_WEAPONS.iter().map(|w| PickupKind::Weapon(*w)));
     v.extend(AttItem::ALL.iter().map(|a| PickupKind::Attachment(*a)));
     v
@@ -707,7 +707,8 @@ impl Editor {
     }
 
     fn sync_pickups(&mut self) {
-        self.game.pickups = self.game.map.pickups.iter().map(|d| PickupState { def: *d, available_at: 0.0 }).collect();
+        self.game.pickups =
+            self.game.map.pickups.iter().map(|d| PickupState { def: *d, available_at: 0.0, expires: None }).collect();
     }
 
     fn snap(&self, v: Vec3) -> Vec3 {
@@ -1965,6 +1966,7 @@ impl Editor {
         for p in &map.pickups {
             let c = match p.kind {
                 PickupKind::Health => Color::new(0.3, 1.0, 0.4, 1.0),
+                PickupKind::Ammo => Color::new(0.8, 0.75, 0.3, 1.0),
                 PickupKind::Weapon(_) => Color::new(1.0, 0.8, 0.3, 1.0),
                 PickupKind::Attachment(a) => {
                     let c = a.color();
@@ -2296,6 +2298,7 @@ impl Editor {
                 .map(|k| {
                     let sw = match k {
                         PickupKind::Health => Some([80, 230, 110]),
+                        PickupKind::Ammo => Some([200, 190, 80]),
                         PickupKind::Weapon(_) => Some([240, 200, 80]),
                         PickupKind::Attachment(a) => Some(a.color()),
                     };
@@ -2446,6 +2449,12 @@ impl Editor {
         };
         if button(&name_label, x, y, pw - x, h) {
             self.naming = !self.naming;
+            // drop the keys typed while flying around (WASD...), they are
+            // still queued as characters
+            while get_char_pressed().is_some() {}
+        }
+        if !self.naming {
+            while get_char_pressed().is_some() {}
         }
         if self.naming {
             while let Some(c) = get_char_pressed() {

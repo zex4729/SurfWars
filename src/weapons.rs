@@ -42,8 +42,11 @@ pub struct WeaponDef {
     pub armor_ratio: f32,
     pub pellets: u32,
     pub automatic: bool,
-    /// Zoom field of view levels (degrees), empty if no scope.
+    /// Built in scope zoom levels (degrees). The Scout has one; everything
+    /// else zooms through its sight attachment.
     pub zoom_fov: &'static [f32],
+    /// The sight a new gun comes with (the AWP's 8x scope).
+    pub default_sight: Sight,
     pub kill_icon: &'static str,
 }
 
@@ -106,6 +109,7 @@ static LASER: WeaponDef = WeaponDef {
     pellets: 1,
     automatic: true,
     zoom_fov: &[],
+    default_sight: Sight::Iron,
     kill_icon: "laser",
 };
 
@@ -125,6 +129,7 @@ static ROCKET: WeaponDef = WeaponDef {
     pellets: 0,
     automatic: true,
     zoom_fov: &[],
+    default_sight: Sight::Iron,
     kill_icon: "rocket",
 };
 
@@ -138,6 +143,10 @@ pub enum Sight {
     RedDot,
     Holo,
     Acog,
+    /// Small 2x scope; the only magnified sight that fits a pistol.
+    Scope2x,
+    /// The AWP's own 8x sniper scope. Built in, never an inventory item.
+    Scope8x,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Hash)]
@@ -174,6 +183,12 @@ pub struct Attachments {
     pub grip: Grip,
 }
 
+/// Field of view (our 90 degree scale) for 2x, 4x and 8x magnification:
+/// tan(fov / 2) = tan(45) / magnification.
+pub const FOV_2X: f32 = 53.13;
+pub const FOV_4X: f32 = 28.07;
+pub const FOV_8X: f32 = 14.25;
+
 /// Multipliers and offsets an attachment set applies to a weapon.
 #[derive(Clone, Copy, Debug)]
 pub struct Mods {
@@ -196,8 +211,8 @@ pub struct Mods {
     pub speed: f32,
     /// Added to the movement speed while aiming down the sight.
     pub ads_speed: f32,
-    /// Zoom FOV the sight gives weapons without a scope.
-    pub zoom: Option<f32>,
+    /// Zoom FOV levels the sight gives (degrees); empty for no zoom.
+    pub zooms: &'static [f32],
     pub silenced: bool,
 }
 
@@ -215,20 +230,22 @@ impl Default for Mods {
             deploy: 1.0,
             speed: 0.0,
             ads_speed: 0.0,
-            zoom: None,
+            zooms: &[],
             silenced: false,
         }
     }
 }
 
 impl Sight {
-    pub const ALL: [Sight; 4] = [Sight::Iron, Sight::RedDot, Sight::Holo, Sight::Acog];
+    pub const ALL: [Sight; 6] = [Sight::Iron, Sight::RedDot, Sight::Holo, Sight::Acog, Sight::Scope2x, Sight::Scope8x];
     pub fn name(self) -> &'static str {
         match self {
             Sight::Iron => "Iron sights",
             Sight::RedDot => "Red dot",
             Sight::Holo => "Holographic",
             Sight::Acog => "4x ACOG",
+            Sight::Scope2x => "2x scope",
+            Sight::Scope8x => "8x sniper scope",
         }
     }
     pub fn desc(self) -> &'static str {
@@ -236,7 +253,9 @@ impl Sight {
             Sight::Iron => "no zoom",
             Sight::RedDot => "MOUSE2 aim down sights, -15% spread aimed, +range dmg",
             Sight::Holo => "MOUSE2 aim down sights, -20% spread aimed, ++range dmg, slower draw",
-            Sight::Acog => "4x zoom, -40% spread aimed, +++range dmg, slow aimed",
+            Sight::Acog => "4x zoom, -40% spread aimed, +++range dmg, slow aimed, not on pistols",
+            Sight::Scope2x => "MOUSE2 2x aim, -25% spread aimed, ++range dmg, fits pistols",
+            Sight::Scope8x => "8x zoom, the AWP's own scope",
         }
     }
 }
@@ -313,9 +332,10 @@ pub enum AttItem {
 }
 
 impl AttItem {
-    pub const ALL: [AttItem; 11] = [
+    pub const ALL: [AttItem; 12] = [
         AttItem::Sight(Sight::RedDot),
         AttItem::Sight(Sight::Holo),
+        AttItem::Sight(Sight::Scope2x),
         AttItem::Sight(Sight::Acog),
         AttItem::Muzzle(Muzzle::Suppressor),
         AttItem::Muzzle(Muzzle::Compensator),
@@ -359,6 +379,7 @@ impl AttItem {
         match self {
             AttItem::Sight(Sight::RedDot) => "reddot",
             AttItem::Sight(Sight::Holo) => "holo",
+            AttItem::Sight(Sight::Scope2x) => "scope2x",
             AttItem::Sight(_) => "acog",
             AttItem::Muzzle(Muzzle::Suppressor) => "suppressor",
             AttItem::Muzzle(Muzzle::Compensator) => "compensator",
@@ -394,7 +415,7 @@ impl AttItem {
 impl Attachments {
     pub fn random(rng: &mut Rng) -> Attachments {
         Attachments {
-            sight: Sight::ALL[rng.range_u32(0, 3) as usize],
+            sight: Sight::ALL[rng.range_u32(0, 4) as usize],
             muzzle: Muzzle::ALL[rng.range_u32(0, 3) as usize],
             stock: Stock::ALL[rng.range_u32(0, 2) as usize],
             grip: Grip::ALL[rng.range_u32(0, 3) as usize],
@@ -404,7 +425,8 @@ impl Attachments {
     /// The item mounted in category `cat`, or None for the default part.
     pub fn get(&self, cat: usize) -> Option<AttItem> {
         match cat {
-            0 => (self.sight != Sight::Iron).then_some(AttItem::Sight(self.sight)),
+            // built in sights (iron sights, the AWP scope) are not items
+            0 => (!matches!(self.sight, Sight::Iron | Sight::Scope8x)).then_some(AttItem::Sight(self.sight)),
             1 => (self.muzzle != Muzzle::None).then_some(AttItem::Muzzle(self.muzzle)),
             2 => (self.stock != Stock::Standard).then_some(AttItem::Stock(self.stock)),
             _ => (self.grip != Grip::None).then_some(AttItem::Grip(self.grip)),
@@ -439,18 +461,27 @@ impl Attachments {
             Sight::Iron => {}
             Sight::RedDot => {
                 m.range_bonus += 0.02;
-                m.zoom = Some(80.0);
+                m.zooms = &[80.0];
                 m.ads_spread = 0.85;
             }
             Sight::Holo => {
                 m.range_bonus += 0.03;
-                m.zoom = Some(72.0);
+                m.zooms = &[72.0];
                 m.ads_spread = 0.8;
                 m.deploy *= 1.1;
             }
+            Sight::Scope2x => {
+                m.range_bonus += 0.025;
+                m.zooms = &[FOV_2X];
+                m.ads_spread = 0.75;
+            }
+            Sight::Scope8x => {
+                m.range_bonus += 0.01;
+                m.zooms = &[FOV_8X];
+            }
             Sight::Acog => {
                 m.range_bonus += 0.045;
-                m.zoom = Some(40.0);
+                m.zooms = &[FOV_4X];
                 m.ads_spread = 0.6;
                 m.ads_speed -= 25.0;
             }
@@ -525,6 +556,7 @@ static KNIFE: WeaponDef = WeaponDef {
     pellets: 0,
     automatic: true,
     zoom_fov: &[],
+    default_sight: Sight::Iron,
     kill_icon: "knife",
 };
 
@@ -544,6 +576,7 @@ static USP: WeaponDef = WeaponDef {
     pellets: 1,
     automatic: false,
     zoom_fov: &[],
+    default_sight: Sight::Iron,
     kill_icon: "usp",
 };
 
@@ -563,6 +596,7 @@ static MP5: WeaponDef = WeaponDef {
     pellets: 1,
     automatic: true,
     zoom_fov: &[],
+    default_sight: Sight::Iron,
     kill_icon: "mp5navy",
 };
 
@@ -582,6 +616,7 @@ static M3: WeaponDef = WeaponDef {
     pellets: 9,
     automatic: true,
     zoom_fov: &[],
+    default_sight: Sight::Iron,
     kill_icon: "m3",
 };
 
@@ -601,6 +636,7 @@ static AK47: WeaponDef = WeaponDef {
     pellets: 1,
     automatic: true,
     zoom_fov: &[],
+    default_sight: Sight::Iron,
     kill_icon: "ak47",
 };
 
@@ -620,6 +656,7 @@ static SCOUT: WeaponDef = WeaponDef {
     pellets: 1,
     automatic: true,
     zoom_fov: &[40.0, 15.0],
+    default_sight: Sight::Iron,
     kill_icon: "scout",
 };
 
@@ -638,7 +675,8 @@ static AWP: WeaponDef = WeaponDef {
     armor_ratio: 1.95,
     pellets: 1,
     automatic: true,
-    zoom_fov: &[40.0, 10.0],
+    zoom_fov: &[],
+    default_sight: Sight::Scope8x,
     kill_icon: "awp",
 };
 
@@ -670,12 +708,69 @@ impl Weapon {
             decrease_shots_at: 0.0,
             delay_fire: false,
             direction: false,
-            att: Attachments::default(),
+            att: Weapon::default_att(id),
         }
     }
 
+    /// A gun with these parts. Iron sights mean the gun's own sight (the
+    /// AWP's scope), and parts that don't fit are left off.
     pub fn with(id: WeaponId, att: Attachments) -> Weapon {
-        Weapon { att, ..Weapon::new(id) }
+        let mut w = Weapon::new(id);
+        for cat in 0..4 {
+            let item = match cat {
+                0 if att.sight == Sight::Iron || att.sight == Sight::Scope8x => None,
+                _ => att.get(cat),
+            };
+            if let Some(it) = item.filter(|it| w.fits(*it)) {
+                w.att.set(cat, Some(it));
+            }
+        }
+        w
+    }
+
+    /// The parts a new gun of this type comes with.
+    pub fn default_att(id: WeaponId) -> Attachments {
+        Attachments { sight: id.def().default_sight, ..Default::default() }
+    }
+
+    /// Whether an attachment can go on this gun: no long range scopes on the
+    /// pistol, and the Scout keeps its own scope.
+    pub fn fits(&self, item: AttItem) -> bool {
+        match (self.id, item) {
+            (WeaponId::Knife, _) => false,
+            (WeaponId::Scout, AttItem::Sight(_)) => false,
+            (_, AttItem::Sight(Sight::Scope8x)) => false,
+            (_, AttItem::Sight(Sight::Acog)) => self.def().slot != Slot::Secondary,
+            _ => true,
+        }
+    }
+
+    /// Mounts `item` in category `cat` (None: the gun's default part) and
+    /// returns the item that was there. Doesn't check `fits`.
+    pub fn set_part(&mut self, cat: usize, item: Option<AttItem>) -> Option<AttItem> {
+        let old = self.att.get(cat);
+        match (cat, item) {
+            (0, None) => self.att.sight = self.def().default_sight,
+            _ => {
+                self.att.set(cat, item);
+            }
+        }
+        old
+    }
+
+    /// Name of the part a category falls back to.
+    pub fn default_part_name(&self, cat: usize) -> &'static str {
+        match cat {
+            0 => self.def().default_sight.name(),
+            1 => "No muzzle",
+            2 => "Standard stock",
+            _ => "No grip",
+        }
+    }
+
+    /// Scout and AWP: CS sniper rules (zoomed speed, bolt unzoom).
+    pub fn is_sniper(&self) -> bool {
+        matches!(self.id, WeaponId::Scout | WeaponId::Awp)
     }
 
     pub fn mods(&self) -> Mods {
@@ -698,10 +793,8 @@ impl Weapon {
         let d = self.def();
         if !d.zoom_fov.is_empty() {
             d.zoom_fov.len() as u8
-        } else if self.mods().zoom.is_some() {
-            1
         } else {
-            0
+            self.mods().zooms.len() as u8
         }
     }
 
@@ -713,7 +806,8 @@ impl Weapon {
         if !d.zoom_fov.is_empty() {
             d.zoom_fov[(level as usize - 1).min(d.zoom_fov.len() - 1)]
         } else {
-            self.mods().zoom.unwrap_or(90.0)
+            let z = self.mods().zooms;
+            z.get(level as usize - 1).copied().unwrap_or(90.0)
         }
     }
 
@@ -726,7 +820,7 @@ impl Weapon {
     /// True when the view shows a scope overlay: sniper scopes and the ACOG.
     /// Red dot and holographic sights aim down the sight instead.
     pub fn scope_view(&self, level: u8) -> bool {
-        level > 0 && (!self.def().zoom_fov.is_empty() || self.att.sight == Sight::Acog)
+        level > 0 && (!self.def().zoom_fov.is_empty() || matches!(self.att.sight, Sight::Acog | Sight::Scope8x))
     }
 
     /// Aiming down an open sight: the gun moves to the centre of the view.

@@ -196,6 +196,8 @@ pub struct PickupState {
     pub def: PickupDef,
     /// Game time when it is available again (0 = available).
     pub available_at: f64,
+    /// Dropped by a dead player: gone after this time (or once taken).
+    pub expires: Option<f64>,
 }
 
 pub struct Player {
@@ -331,7 +333,8 @@ impl Player {
     pub fn maxspeed(&self) -> f32 {
         let def = self.active_id().def();
         let mods = self.weapon().map(|w| w.mods()).unwrap_or_default();
-        let base = if self.zoom > 0 && !def.zoom_fov.is_empty() { def.zoom_maxspeed } else { def.maxspeed };
+        let sniper = self.weapon().is_some_and(|w| w.is_sniper());
+        let base = if self.zoom > 0 && sniper { def.zoom_maxspeed } else { def.maxspeed };
         let ads = if self.zoom > 0 && def.zoom_fov.is_empty() { mods.ads_speed } else { 0.0 };
         (base + mods.speed + ads).max(100.0)
     }
@@ -365,7 +368,7 @@ impl Player {
         }
         if let Some(w) = self.slot_weapon_mut(slot) {
             let items = w.att.items();
-            w.att = Attachments::default();
+            w.att = Weapon::default_att(w.id);
             self.inventory.extend(items);
         }
     }
@@ -380,11 +383,11 @@ impl Player {
         let pref = self.attachments_for(id);
         for cat in 0..4 {
             let Some(item) = pref.get(cat) else { continue };
-            let free = self.slot_weapon(slot).is_some_and(|w| w.att.get(cat).is_none());
+            let free = self.slot_weapon(slot).is_some_and(|w| w.att.get(cat).is_none() && w.fits(item));
             if let Some(k) = self.inventory.iter().position(|x| *x == item).filter(|_| free) {
                 self.inventory.remove(k);
                 if let Some(w) = self.slot_weapon_mut(slot) {
-                    w.att.set(cat, Some(item));
+                    w.set_part(cat, Some(item));
                 }
             }
         }
@@ -453,7 +456,7 @@ impl Game {
 
     pub fn with_map(map: Map, settings: Settings, seed: u64) -> Game {
         let vars = settings.vars;
-        let pickups = map.pickups.iter().map(|d| PickupState { def: *d, available_at: 0.0 }).collect();
+        let pickups = map.pickups.iter().map(|d| PickupState { def: *d, available_at: 0.0, expires: None }).collect();
         let mut g = Game {
             map,
             vars,
@@ -662,8 +665,9 @@ impl Game {
     /// mounted before. Works anywhere, like a backpack.
     pub fn mount(&mut self, idx: usize, slot: Slot, cat: usize, item: Option<AttItem>) -> bool {
         let p = &mut self.players[idx];
-        let Some(cur) = p.slot_weapon(slot).map(|w| w.att.get(cat)) else { return false };
-        if cur == item || item.is_some_and(|it| it.category() != cat) {
+        let Some(w) = p.slot_weapon(slot) else { return false };
+        let cur = w.att.get(cat);
+        if cur == item || item.is_some_and(|it| it.category() != cat || !w.fits(it)) {
             return false;
         }
         if let Some(it) = item {
@@ -671,7 +675,7 @@ impl Game {
             p.inventory.remove(k);
         }
         let Some(w) = p.slot_weapon_mut(slot) else { return false };
-        let old = w.att.set(cat, item);
+        let old = w.set_part(cat, item);
         let (id, att, levels) = (w.id, w.att, w.zoom_levels());
         p.inventory.extend(old);
         p.set_attachments(id, att);
@@ -812,6 +816,8 @@ impl Game {
         }
 
         self.update_dropped();
+        let now = self.time;
+        self.pickups.retain(|p| p.expires.is_none_or(|t| t > now));
         self.update_rockets();
 
         // Deathmatch respawns.
@@ -1180,7 +1186,8 @@ impl Game {
             p.pm.punchangle = before + (punch - before) * mods.recoil;
             p.next_attack = now + def.cycle as f64;
             p.last_fire = now;
-            if !def.zoom_fov.is_empty() && p.zoom > 0 {
+            // snipers unzoom while the bolt cycles
+            if matches!(id, WeaponId::Scout | WeaponId::Awp) && p.zoom > 0 {
                 p.resume_zoom = Some(p.zoom);
                 p.zoom = 0;
             }
@@ -1395,6 +1402,22 @@ impl Game {
             if self.settings.mode == Mode::Deathmatch {
                 p.respawn_at = Some(now + DM_RESPAWN_DELAY);
             }
+        }
+        // Drop an ammo box on the ground below, or where they died if there
+        // is no ground (surfers die in the air).
+        {
+            let pos = self.players[victim].pm.origin;
+            let tr = self.map.world.trace_ray(pos, pos - vec3(0.0, 0.0, 3000.0));
+            let at = if tr.hit() && tr.normal.z > 0.7 && tr.endpos.z > self.map.kill_z {
+                tr.endpos + vec3(0.0, 0.0, 22.0)
+            } else {
+                pos
+            };
+            self.pickups.push(PickupState {
+                def: PickupDef { pos: at, kind: PickupKind::Ammo },
+                available_at: now + 0.3,
+                expires: Some(now + 30.0),
+            });
         }
         // Drop the best weapon.
         let drop = {
@@ -1621,6 +1644,21 @@ impl Game {
                 continue;
             }
             let taken = match pk.def.kind {
+                PickupKind::Ammo => {
+                    // map boxes fill both guns up; a dropped box gives a
+                    // magazine for each
+                    let full = pk.expires.is_none();
+                    let p = &mut self.players[i];
+                    let mut got = false;
+                    for w in [p.primary.as_mut(), p.secondary.as_mut()].into_iter().flatten() {
+                        let max = w.def().reserve;
+                        if w.reserve < max {
+                            w.reserve = if full { max } else { (w.reserve + w.def().clip).min(max) };
+                            got = true;
+                        }
+                    }
+                    got
+                }
                 PickupKind::Health => {
                     let p = &mut self.players[i];
                     if p.health < 100.0 {
@@ -1686,6 +1724,9 @@ impl Game {
             };
             if taken {
                 self.pickups[k].available_at = now + pk.def.kind.respawn();
+                if pk.expires.is_some() {
+                    self.pickups[k].expires = Some(now);
+                }
                 let health = pk.def.kind == PickupKind::Health;
                 self.events.push(Event::PickupTaken { player: i, pos: pk.def.pos, health });
             }

@@ -113,7 +113,7 @@ fn bot_routes() {
             let mut max_speed: f32 = 0.0;
             let mut surf_ticks = 0;
             let mut log = String::new();
-            for tick in 0..3000 {
+            for tick in 0..5000 {
                 g.step(None);
                 for e in g.events.drain(..) {
                     if let Event::Teleport { .. } = e {
@@ -472,8 +472,9 @@ mod weapon_tests {
             g.players[1].health = 1e9;
         };
         g.give(0, id);
-        g.players[0].primary.as_mut().map(|w| w.att = att);
-        g.players[0].secondary.as_mut().filter(|w| w.id == id).map(|w| w.att = att);
+        let fitted = Weapon::with(id, att).att;
+        g.players[0].primary.as_mut().map(|w| w.att = fitted);
+        g.players[0].secondary.as_mut().filter(|w| w.id == id).map(|w| w.att = fitted);
         let settle = |g: &mut Game, n: usize| {
             for _ in 0..n {
                 pin(g);
@@ -572,14 +573,14 @@ mod weapon_tests {
         }
         println!("\nsights on the MP5, first shots standing at 1500 units:");
         let mut sight_rates = Vec::new();
-        for sight in [Sight::Iron, Sight::RedDot, Sight::Holo, Sight::Acog] {
+        for sight in [Sight::Iron, Sight::RedDot, Sight::Holo, Sight::Scope2x, Sight::Acog] {
             let att = Attachments { sight, ..Default::default() };
             let aim = sight != Sight::Iron;
             let r = accuracy(WeaponId::Mp5, att, 1500.0, Stance::Standing, aim, 40, false);
             println!("  {:<14} {r:>5.0}%", sight.name());
             sight_rates.push(r);
         }
-        assert!(sight_rates[3] >= sight_rates[0] - 5.0, "ACOG worse than iron sights: {sight_rates:?}");
+        assert!(sight_rates[4] >= sight_rates[0] - 5.0, "ACOG worse than iron sights: {sight_rates:?}");
 
         // Sanity: close range standing first shots hit, the air is worse than
         // the ground, and scoped snipers hit at range.
@@ -623,7 +624,7 @@ mod weapon_tests {
         let c = cmd(&g, IN_ATTACK2);
         g.step(Some(c));
         assert_eq!(g.players[0].zoom, 1);
-        assert_eq!(g.players[0].fov(), 40.0);
+        assert_eq!(g.players[0].fov(), FOV_8X, "the AWP zooms straight to 8x");
         let c = cmd(&g, IN_ATTACK);
         g.step(Some(c));
         assert_eq!(g.players[0].zoom, 0, "the AWP unzooms while the bolt cycles");
@@ -786,10 +787,27 @@ fn attachments_modify_weapons() {
     assert!(acog.is_ads(1) && acog.zoom_fov(1) < 50.0);
     let supp = Attachments { muzzle: Muzzle::Suppressor, ..Default::default() }.mods();
     assert!(supp.silenced && supp.damage < 1.0);
-    // an AWP keeps its own scope levels whatever sight is chosen
-    let awp = Weapon::with(WeaponId::Awp, Attachments { sight: Sight::RedDot, ..Default::default() });
-    assert_eq!(awp.zoom_levels(), 2);
-    assert!(!awp.is_ads(1));
+    // the AWP comes with an 8x scope, and other sights can replace it
+    let awp = Weapon::new(WeaponId::Awp);
+    assert_eq!(awp.att.sight, Sight::Scope8x);
+    assert_eq!(awp.zoom_levels(), 1);
+    assert!(awp.scope_view(1) && (awp.zoom_fov(1) - FOV_8X).abs() < 0.01);
+    assert!(awp.att.get(0).is_none(), "the built in scope is not an inventory item");
+    let mut awp_dot = Weapon::with(WeaponId::Awp, Attachments { sight: Sight::RedDot, ..Default::default() });
+    assert!(awp_dot.ads_view(1) && !awp_dot.scope_view(1));
+    // taking the red dot off puts the 8x back
+    assert_eq!(awp_dot.set_part(0, None), Some(AttItem::Sight(Sight::RedDot)));
+    assert_eq!(awp_dot.att.sight, Sight::Scope8x);
+    // pistols: no ACOG, but the 2x fits
+    let usp = Weapon::new(WeaponId::Usp);
+    assert!(!usp.fits(AttItem::Sight(Sight::Acog)));
+    assert!(usp.fits(AttItem::Sight(Sight::Scope2x)));
+    let usp_acog = Weapon::with(WeaponId::Usp, Attachments { sight: Sight::Acog, ..Default::default() });
+    assert_eq!(usp_acog.att.sight, Sight::Iron, "an ACOG must not end up on a pistol");
+    let usp2 = Weapon::with(WeaponId::Usp, Attachments { sight: Sight::Scope2x, ..Default::default() });
+    assert!(usp2.ads_view(1) && (usp2.zoom_fov(1) - FOV_2X).abs() < 0.01);
+    // the Scout keeps its own scope
+    assert!(!Weapon::new(WeaponId::Scout).fits(AttItem::Sight(Sight::RedDot)));
 }
 
 /// Health packs heal and then respawn later.
@@ -837,7 +855,7 @@ fn editor_build_save_play() {
     ed.restyle_sel(true);
     ed.add_spawn(crate::map::Team::T);
     ed.add_spawn(crate::map::Team::CT);
-    for k in 0..9 {
+    for k in 0..10 {
         ed.set_pickup_kind(k);
         ed.add_pickup();
     }
@@ -910,30 +928,22 @@ fn solo_game(map: &str) -> crate::game::Game {
     Game::new(s, 3)
 }
 
-/// Every sky ramp: the launch pad throws you onto the ramp, the boosters
-/// carry you up, and you land on the sky platform.
+/// Every sky platform: standing on its hidden pad throws you onto it.
 #[test]
 fn sky_ramps_reach_platforms() {
     for name in map::BUILTIN_MAPS {
         let g0 = solo_game(name);
         let skies = g0.map.sky.clone();
-        let converted = matches!(name, "surf_ski" | "surf_utopia");
-        assert!(skies.len() == 2 || converted, "{name} has {} sky ramps", skies.len());
+        let has_sky = matches!(name, "surf_wars" | "surf_canyon" | "surf_hairpin");
+        assert!(skies.len() == 2 || !has_sky, "{name} has {} sky platforms", skies.len());
         for (k, sky) in skies.iter().enumerate() {
             let mut g = solo_game(name);
             g.players[0].pm = PmState::new(sky.pad + vec3(0.0, 0.0, 38.0));
-            let yaw = if sky.dir > 0.0 { 0.0 } else { 180.0 };
             let mut reached = None;
-            let mut maxz = 0.0f32;
-            let mut max_speed = 0.0f32;
-            let mut last = Vec3::ZERO;
-            for t in 0..3000 {
-                let cmd = surf_cmd(&g.players[0].pm, yaw);
-                g.step(Some(cmd));
+            for t in 0..900 {
+                g.step(Some(UserCmd { msec: 10, ..Default::default() }));
                 g.events.clear();
                 let p = &g.players[0].pm;
-                maxz = maxz.max(p.origin.z);
-                max_speed = max_speed.max(p.velocity.length());
                 let feet = p.origin + vec3(0.0, 0.0, p.mins().z);
                 let pl = sky.platform;
                 if p.onground
@@ -946,22 +956,27 @@ fn sky_ramps_reach_platforms() {
                     reached = Some(t as f32 * 0.01);
                     break;
                 }
-                if t % 100 == 0 && std::env::var("SKYLOG").is_ok() {
-                    println!(
-                        "  t={:.1} pos={:.0?} vel={:.0?} surf={}",
-                        t as f32 * 0.01,
-                        p.origin,
-                        p.velocity,
-                        p.is_surfing()
-                    );
-                }
-                last = p.origin;
             }
-            println!(
-                "{name} sky {k}: reached={reached:?} max_z={maxz:.0} max_speed={max_speed:.0} platform_top={:.0} last={last:.0?}",
-                sky.platform.maxs.z
-            );
-            assert!(reached.is_some(), "{name} sky ramp {k} does not reach its platform");
+            println!("{name} sky {k}: reached={reached:?} platform_top={:.0}", sky.platform.maxs.z);
+            assert!(reached.is_some(), "{name} sky platform {k}: the hidden pad does not land on it");
+            // and nothing leads up to it: no brush touches the platform
+            let pl = sky.platform;
+            let touching = g
+                .map
+                .world
+                .brushes
+                .iter()
+                .filter(|b| {
+                    b.mins.x <= pl.maxs.x + 1.0
+                        && b.maxs.x >= pl.mins.x - 1.0
+                        && b.mins.y <= pl.maxs.y + 1.0
+                        && b.maxs.y >= pl.mins.y - 1.0
+                        && b.mins.z <= pl.maxs.z + 300.0
+                        && b.maxs.z >= pl.mins.z - 300.0
+                        && b.mat.visible()
+                })
+                .count();
+            assert_eq!(touching, 1, "{name} sky platform {k} has something attached");
         }
     }
 }
@@ -980,6 +995,9 @@ fn spawn_launchers_land_on_ramps() {
             .map(|b| b.pad())
             .filter(|p| !sky_pads.iter().any(|q| q.distance(*p) < 1.0))
             .collect();
+        if name == "surf_odyssey" {
+            continue; // its pads go to islands, see odyssey_pads
+        }
         assert!(!pads.is_empty() || matches!(name, "surf_ski" | "surf_utopia"), "{name} has no spawn launch pads");
         for pad in pads {
             let mut g = solo_game(name);
@@ -1083,6 +1101,10 @@ fn attachment_inventory() {
     let p = &g.players[0];
     assert_eq!(p.inventory, vec![AttItem::Sight(Sight::RedDot)]);
     assert!(p.primary.unwrap().scope_view(1), "the ACOG is a scope");
+    // the ACOG won't go on the pistol
+    g.players[0].inventory.push(AttItem::Sight(Sight::Acog));
+    assert!(!g.mount(0, Slot::Secondary, 0, Some(AttItem::Sight(Sight::Acog))));
+    g.players[0].inventory.pop();
     // back to iron sights
     assert!(g.mount(0, Slot::Primary, 0, None));
     assert_eq!(g.players[0].inventory.len(), 2);
@@ -1106,7 +1128,7 @@ fn attachments_extend_range() {
     use crate::weapons::*;
     for id in [WeaponId::Usp, WeaponId::Mp5, WeaponId::M3, WeaponId::Ak47] {
         let base = Weapon::new(id);
-        for item in AttItem::ALL {
+        for item in AttItem::ALL.into_iter().filter(|it| base.fits(*it)) {
             let mut att = Attachments::default();
             att.set(item.category(), Some(item));
             let w = Weapon::with(id, att);
@@ -1217,4 +1239,79 @@ fn editor_faces_clip_teleports() {
     assert_eq!(back.routes.len(), m.routes.len());
     assert_eq!(back.routes[0].points.len(), m.routes[0].points.len());
     assert_eq!(back.routes[0].name, m.routes[0].name);
+}
+
+/// Ammo boxes on the map fill both guns; a killed player drops a box with a
+/// magazine for each gun that disappears after a while.
+#[test]
+fn ammo_drops() {
+    use crate::game::*;
+    use crate::map::PickupKind;
+    use crate::weapons::*;
+    let mut g = solo_game("surf_wars");
+    g.give(0, WeaponId::Mp5);
+    let k = g.pickups.iter().position(|p| p.def.kind == PickupKind::Ammo).expect("ammo box on surf_wars");
+    g.players[0].primary.as_mut().unwrap().reserve = 0;
+    g.players[0].secondary.as_mut().unwrap().reserve = 3;
+    g.players[0].pm = PmState::new(g.pickups[k].def.pos - vec3(0.0, 0.0, 20.0));
+    g.step(Some(UserCmd { msec: 10, ..Default::default() }));
+    assert_eq!(g.players[0].primary.unwrap().reserve, WeaponId::Mp5.def().reserve);
+    assert_eq!(g.players[0].secondary.unwrap().reserve, WeaponId::Usp.def().reserve);
+    assert!(g.pickups[k].available_at > g.time, "box should respawn later");
+
+    // a bot dies on the spawn floor and drops a box there
+    let s = Settings {
+        player_team: Some(crate::map::Team::T),
+        bots_t: 0,
+        bots_ct: 1,
+        mode: Mode::Deathmatch,
+        ..Default::default()
+    };
+    let mut g = Game::new(s, 5);
+    g.players[1].pm = PmState::new(vec3(-4000.0, 300.0, 2436.0));
+    let n = g.pickups.len();
+    g.damage(1, Some(0), 500.0, HitGroup::Chest, 1.0, Some(WeaponId::Ak47), vec3(-4000.0, 300.0, 2450.0));
+    assert_eq!(g.pickups.len(), n + 1);
+    let drop = *g.pickups.last().unwrap();
+    assert_eq!(drop.def.kind, PickupKind::Ammo);
+    assert!((drop.def.pos.z - 2422.0).abs() < 2.0, "box not on the floor: {}", drop.def.pos);
+    g.give(0, WeaponId::Mp5);
+    g.players[0].primary.as_mut().unwrap().reserve = 0;
+    g.players[0].pm = PmState::new(vec3(-4000.0, 300.0, 2436.0));
+    for _ in 0..40 {
+        g.step(Some(UserCmd { msec: 10, ..Default::default() }));
+    }
+    assert_eq!(g.players[0].primary.unwrap().reserve, WeaponId::Mp5.def().clip, "one magazine from a dropped box");
+    assert_eq!(g.pickups.len(), n, "taken box should be gone");
+}
+
+/// surf_odyssey: every arena and island pad lands you on solid ground.
+#[test]
+fn odyssey_pads() {
+    let g0 = solo_game("surf_odyssey");
+    let pads: Vec<Vec3> =
+        g0.map.boosters.iter().filter(|b| matches!(b.push, crate::map::Push::Launch { .. })).map(|b| b.pad()).collect();
+    assert!(pads.len() >= 9);
+    for pad in pads {
+        let mut g = solo_game("surf_odyssey");
+        g.players[0].pm = PmState::new(pad + vec3(0.0, 0.0, 38.0));
+        let mut landed = None;
+        for t in 0..800 {
+            g.step(Some(UserCmd { msec: 10, ..Default::default() }));
+            if g.events.drain(..).any(|e| matches!(e, crate::game::Event::Teleport { .. })) {
+                break;
+            }
+            let p = &g.players[0].pm;
+            if std::env::var("PADLOG").is_ok() && t % 25 == 0 {
+                println!("  t={t} {:.0?} v={:.0?}", p.origin, p.velocity);
+            }
+            if t > 50 && p.onground {
+                landed = Some(p.origin);
+                break;
+            }
+        }
+        println!("pad {pad:.0?} -> {landed:.0?}");
+        let l = landed.unwrap_or_else(|| panic!("pad {pad} never lands"));
+        assert!(l.z > 2700.0 && l.distance(pad) > 3000.0, "pad {pad} landed at {l}");
+    }
 }

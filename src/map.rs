@@ -139,12 +139,15 @@ pub enum PickupKind {
     Weapon(WeaponId),
     /// A weapon attachment for the inventory.
     Attachment(AttItem),
+    /// An ammo box: fills up both guns.
+    Ammo,
 }
 
 impl PickupKind {
     pub fn key(self) -> &'static str {
         match self {
             PickupKind::Health => "health",
+            PickupKind::Ammo => "ammo",
             PickupKind::Weapon(w) => w.key(),
             PickupKind::Attachment(a) => a.key(),
         }
@@ -153,6 +156,8 @@ impl PickupKind {
     pub fn from_key(k: &str) -> Option<PickupKind> {
         if k == "health" {
             Some(PickupKind::Health)
+        } else if k == "ammo" {
+            Some(PickupKind::Ammo)
         } else if let Some(a) = AttItem::from_key(k) {
             Some(PickupKind::Attachment(a))
         } else {
@@ -163,6 +168,7 @@ impl PickupKind {
     pub fn name(self) -> &'static str {
         match self {
             PickupKind::Health => "Health",
+            PickupKind::Ammo => "Ammo",
             PickupKind::Weapon(w) => w.def().name,
             PickupKind::Attachment(a) => a.name(),
         }
@@ -172,6 +178,7 @@ impl PickupKind {
     pub fn respawn(self) -> f64 {
         match self {
             PickupKind::Health => 15.0,
+            PickupKind::Ammo => 20.0,
             PickupKind::Weapon(_) => 25.0,
             PickupKind::Attachment(a) if a.rare() => 60.0,
             PickupKind::Attachment(_) => 35.0,
@@ -379,7 +386,8 @@ impl Map {
     }
 }
 
-pub const BUILTIN_MAPS: [&str; 5] = ["surf_wars", "surf_canyon", "surf_hairpin", "surf_ski", "surf_utopia"];
+pub const BUILTIN_MAPS: [&str; 6] =
+    ["surf_wars", "surf_canyon", "surf_hairpin", "surf_ski", "surf_utopia", "surf_odyssey"];
 
 /// Built-in maps followed by the custom maps saved with the editor.
 pub fn map_names() -> Vec<String> {
@@ -395,6 +403,7 @@ pub fn load(name: &str) -> Map {
         "surf_hairpin" => surf_hairpin(),
         "surf_ski" => surf_ski(),
         "surf_utopia" => surf_utopia(),
+        "surf_odyssey" => surf_odyssey(),
         _ => match crate::mapfile::load(name) {
             Ok(m) => m,
             Err(e) => {
@@ -519,13 +528,11 @@ fn perch_line(b: &mut Vec<Brush>, pts: &[(f32, f32)], perch: (f32, f32), top: f3
     b.push(block(perch.0, perch.1, 48.0, top - 200.0, top, mat));
 }
 
-/// A launch pad, a rising boosted surf ramp and the sky platform at its top.
+/// A sky platform with rare items, and the hidden launch pad that leads to it.
 #[derive(Clone, Copy, Debug)]
 #[cfg_attr(not(test), allow(dead_code))]
 pub struct SkyRamp {
     pub pad: Vec3,
-    /// +1 when the ramp climbs toward +x, -1 toward -x.
-    pub dir: f32,
     pub platform: Aabb,
 }
 
@@ -538,7 +545,6 @@ impl Aabb {
     }
 }
 
-const SKY_RAMP: Mat = Mat::new(Tex::Grid, [240, 110, 200]);
 const SKY_PLATFORM: Mat = Mat::new(Tex::Metal, [250, 215, 120]);
 
 /// Launch pad on the ground.
@@ -554,95 +560,50 @@ fn add_launchers(b: &mut Vec<Brush>, boosters: &mut Vec<Booster>, list: &[(Vec3,
     }
 }
 
-/// Settings for a pair of sky ramps. The T ramp runs along X at `y` from
-/// `x0` to `x1` with its ridge climbing from `z0` to `z1`; the CT ramp is
-/// the same rotated 180 degrees about the map centre. A launch pad at
-/// `pad` throws players onto the start of the ramp, three boosters push
-/// them up it, and the platform at the top holds `items`.
+/// A pair of sky platforms: bare floating slabs high above the map, no
+/// walls and no ramp up. The only way up for the T one is a small launch pad
+/// hidden on a tiny pillar at `hide`; the CT pair is the same rotated 180
+/// degrees about the map centre. Finding the pad, and landing the jump to its
+/// pillar, is up to the players.
 struct SkyDef {
-    y: f32,
-    x0: f32,
-    x1: f32,
-    z0: f32,
-    z1: f32,
-    pad: Vec3,
+    /// Top centre of the T platform.
+    platform: Vec3,
+    /// Top centre of the tiny pillar that holds the hidden pad.
+    hide: Vec3,
     secs: f32,
     items: &'static [PickupKind],
 }
 
-fn sky_ramps(
+fn sky_platforms(
     b: &mut Vec<Brush>,
     boosters: &mut Vec<Booster>,
     pickups: &mut Vec<PickupDef>,
     sky: &mut Vec<SkyRamp>,
     d: &SkyDef,
 ) {
-    let (hw, h) = (LANE_HALF_WIDTH, LANE_HEIGHT);
-    let ridge = |x: f32| d.z0 + (d.z1 - d.z0) * (x - d.x0) / (d.x1 - d.x0);
-    let sgn = (d.x1 - d.x0).signum();
+    let half = 340.0;
     for s in [1.0f32, -1.0] {
         let r = |p: Vec3| vec3(p.x * s, p.y * s, p.z);
-        let mut local = vec![ramp_x(
-            d.x0.min(d.x1),
-            d.x0.max(d.x1),
-            d.y,
-            ridge(d.x0.min(d.x1)),
-            ridge(d.x0.max(d.x1)),
-            hw,
-            h,
-            SKY_RAMP,
-        )];
-        // The platform starts right where the ramp ends and sits below the
-        // ridge, so anyone flying off the top of the ramp lands on it.
-        let top = d.z1 - h * 0.5;
-        let (px0, px1) = (d.x1, d.x1 + sgn * 1200.0);
-        let plat = Aabb::new(vec3(px0.min(px1), d.y - 420.0, top - 64.0), vec3(px0.max(px1), d.y + 420.0, top));
-        local.push(cuboid(plat.mins, plat.maxs, SKY_PLATFORM));
-        // A tall wall at the far end catches you flying off the ramp, and
-        // low walls on the sides.
-        let (e0, e1) = (px1, px1 + sgn * 48.0);
-        local.push(cuboid(
-            vec3(e0.min(e1), d.y - 468.0, top - 64.0),
-            vec3(e0.max(e1), d.y + 468.0, top + 900.0),
-            SKY_PLATFORM,
+        let top = r(d.platform);
+        let plat = Aabb::new(top - vec3(half, half, 64.0), top + vec3(half, half, 0.0));
+        b.push(cuboid(plat.mins, plat.maxs, SKY_PLATFORM));
+        // the hidden pad: a tiny pillar with a small pad on top
+        let hide = r(d.hide);
+        b.push(block(hide.x, hide.y, 26.0, hide.z - 180.0, hide.z, PERCH));
+        b.push(cuboid(
+            hide - vec3(22.0, 22.0, 0.0),
+            hide + vec3(22.0, 22.0, 2.0),
+            Mat::new(Tex::Metal, [255, 150, 40]),
         ));
-        for ys in [-1.0f32, 1.0] {
-            let (a, c) = (d.y + ys * 420.0, d.y + ys * 468.0);
-            local.push(cuboid(
-                vec3(px0.min(px1), a.min(c), top),
-                vec3(px0.max(px1), a.max(c), top + 160.0),
-                SKY_PLATFORM,
-            ));
-        }
-        for br in local {
-            let pts: Vec<Vec3> = br.points.iter().map(|p| r(*p)).collect();
-            b.push(Brush::hull(&pts, br.mat));
-        }
-
-        // Boosters along the ramp.
-        let up = vec3(d.x1 - d.x0, 0.0, d.z1 - d.z0).normalize();
-        for t0 in [0.04f32, 0.34, 0.64] {
-            let t1 = t0 + 0.14;
-            let xa = d.x0 + (d.x1 - d.x0) * t0;
-            let xb = d.x0 + (d.x1 - d.x0) * t1;
-            let (za, zb) = (ridge(xa), ridge(xb));
-            let zone =
-                Aabb::new(vec3(xa.min(xb), d.y - hw, za.min(zb) - h), vec3(xa.max(xb), d.y + hw, za.max(zb) + 48.0));
-            boosters.push(Booster::boost(zone.turned(s), vec3(up.x * s, 0.0, up.z), 2300.0));
-        }
-
-        // Launch pad onto the face nearest to it.
-        let side = (d.pad.y - d.y).signum();
-        let tx = d.x0 + sgn * 500.0;
-        let target = vec3(tx, d.y + side * 280.0, ridge(tx) - 280.0 * h / hw + 80.0);
-        pad_brush(b, r(d.pad));
-        boosters.push(Booster::launcher(r(d.pad), r(target), d.secs));
-
+        let mut pad = Booster::launcher(hide + vec3(0.0, 0.0, 2.0), top + vec3(0.0, 0.0, 60.0), d.secs);
+        pad.zone = Aabb::new(hide - vec3(26.0, 26.0, 6.0), hide + vec3(26.0, 26.0, 26.0));
+        boosters.push(pad);
+        let n = d.items.len() as f32;
         for (i, k) in d.items.iter().enumerate() {
-            let x = d.x1 + sgn * (500.0 + 180.0 * i as f32);
-            pickups.push(PickupDef { pos: r(vec3(x, d.y, top + 24.0)), kind: *k });
+            let off = (i as f32 - (n - 1.0) * 0.5) * 160.0;
+            pickups.push(PickupDef { pos: top + vec3(off * s, 0.0, 24.0), kind: *k });
         }
-        sky.push(SkyRamp { pad: r(d.pad), dir: sgn * s, platform: plat.turned(s) });
+        sky.push(SkyRamp { pad: hide + vec3(0.0, 0.0, 2.0), platform: plat });
     }
 }
 
@@ -872,6 +833,11 @@ fn surf_wars() -> Map {
 
     let mut pickups = vec![
         att(AttItem::Grip(Grip::Vertical), 0.0, 1300.0, iz + 62.0),
+        att(AttItem::Sight(Sight::Scope2x), -380.0, 220.0, iz + 104.0),
+        PickupDef { pos: vec3(-560.0, 0.0, iz + 24.0), kind: PickupKind::Ammo },
+        PickupDef { pos: vec3(560.0, 0.0, iz + 24.0), kind: PickupKind::Ammo },
+        PickupDef { pos: vec3(0.0, 2250.0, tz + 90.0), kind: PickupKind::Ammo },
+        PickupDef { pos: vec3(0.0, -2250.0, tz + 90.0), kind: PickupKind::Ammo },
         att(AttItem::Sight(Sight::RedDot), 0.0, -1300.0, iz + 62.0),
         att(AttItem::Muzzle(Muzzle::Compensator), -120.0, 1960.0, tz + 62.0),
         att(AttItem::Stock(Stock::Light), 120.0, -1960.0, tz + 62.0),
@@ -973,21 +939,18 @@ fn surf_wars() -> Map {
         boosters.push(Booster::two_way(zone, Vec3::X, 1700.0));
     }
 
-    // Sky ramps along the outside, with the rare attachments on top.
+    // Sky platforms with the rare attachments. The way up is a pad hidden one
+    // tiny pillar past the AK perch.
     let mut sky = Vec::new();
-    sky_ramps(
+    sky_platforms(
         &mut b,
         &mut boosters,
         &mut pickups,
         &mut sky,
         &SkyDef {
-            y: 3350.0,
-            x0: -4000.0,
-            x1: 2400.0,
-            z0: 2200.0,
-            z1: 3700.0,
-            pad: vec3(-4320.0, 1780.0, SW_SPAWN_Z),
-            secs: 1.7,
+            platform: vec3(3000.0, 3350.0, 3300.0),
+            hide: vec3(0.0, 1560.0, iz),
+            secs: 2.0,
             items: &[
                 PickupKind::Attachment(AttItem::Sight(Sight::Acog)),
                 PickupKind::Attachment(AttItem::Muzzle(Muzzle::Suppressor)),
@@ -1138,6 +1101,9 @@ fn surf_canyon() -> Map {
     ];
     let mut pickups = vec![
         att(AttItem::Sight(Sight::RedDot), 0.0, 0.0, pz + 62.0),
+        att(AttItem::Sight(Sight::Scope2x), 0.0, 900.0, pz + 112.0),
+        PickupDef { pos: vec3(-150.0, 1050.0, pz + 24.0), kind: PickupKind::Ammo },
+        PickupDef { pos: vec3(150.0, -1050.0, pz + 24.0), kind: PickupKind::Ammo },
         att(AttItem::Grip(Grip::Angled), -420.0, 1020.0, pz + 62.0),
         att(AttItem::Muzzle(Muzzle::LongBarrel), 420.0, -1020.0, pz + 62.0),
         gun(WeaponId::Awp, 0.0, 0.0, pz + 24.0),
@@ -1221,20 +1187,17 @@ fn surf_canyon() -> Map {
         1700.0,
     ));
 
+    // Hidden pad: a tiny pillar off the end of a middle platform.
     let mut sky = Vec::new();
-    sky_ramps(
+    sky_platforms(
         &mut b,
         &mut boosters,
         &mut pickups,
         &mut sky,
         &SkyDef {
-            y: 3500.0,
-            x0: -5000.0,
-            x1: 2600.0,
-            z0: 2350.0,
-            z1: 3950.0,
-            pad: vec3(-5000.0, 2180.0, SC_SPAWN_Z),
-            secs: 1.7,
+            platform: vec3(3200.0, 3500.0, 3600.0),
+            hide: vec3(0.0, 1330.0, pz),
+            secs: 2.0,
             items: &[
                 PickupKind::Attachment(AttItem::Sight(Sight::Holo)),
                 PickupKind::Attachment(AttItem::Sight(Sight::Acog)),
@@ -1375,8 +1338,7 @@ fn surf_hairpin() -> Map {
         local.push(cuboid(vec3(-9300.0, 300.0, sz - 64.0), vec3(-8988.0, 1500.0, sz), team_mat));
         local.push(cuboid(vec3(-8988.0, 300.0, sz - 64.0), vec3(-8012.0, 1500.0, sz), tint(team_mat, m0)));
         local.push(cuboid(vec3(-8012.0, 300.0, sz - 64.0), vec3(-7700.0, 1500.0, sz), team_mat));
-        // back wall, with a gap at the west end for the sky ramp launch pad
-        local.push(cuboid(vec3(-8950.0, 1500.0, sz - 64.0), vec3(-7700.0, 1564.0, sz + 300.0), trim));
+        local.push(cuboid(vec3(-9300.0, 1500.0, sz - 64.0), vec3(-7700.0, 1564.0, sz + 300.0), trim));
         local.push(cuboid(vec3(-8700.0, 1200.0, 0.0), vec3(-8300.0, 1500.0, sz - 64.0), CONCRETE));
         local.push(block(-9100.0, 1300.0, 32.0, sz, sz + 64.0, CRATE));
         local.push(block(-7900.0, 1300.0, 32.0, sz, sz + 64.0, CRATE));
@@ -1428,6 +1390,9 @@ fn surf_hairpin() -> Map {
 
     let mut pickups = vec![
         att(AttItem::Sight(Sight::RedDot), 0.0, 0.0, fz + 62.0),
+        att(AttItem::Sight(Sight::Scope2x), -350.0, 200.0, fz + 104.0),
+        PickupDef { pos: vec3(200.0, 150.0, fz + 24.0), kind: PickupKind::Ammo },
+        PickupDef { pos: vec3(-200.0, -150.0, fz + 24.0), kind: PickupKind::Ammo },
         gun(WeaponId::Awp, 0.0, 0.0, fz + 24.0),
         health(-450.0, 0.0, fz + 24.0),
         health(450.0, 0.0, fz + 24.0),
@@ -1497,20 +1462,17 @@ fn surf_hairpin() -> Map {
         boosters.push(Booster::boost(leg2.turned(s), vec3(-s, 0.0, 0.0), 1900.0));
     }
 
+    // Hidden pad: a tiny pillar off a corner of the sky fort.
     let mut sky = Vec::new();
-    sky_ramps(
+    sky_platforms(
         &mut b,
         &mut boosters,
         &mut pickups,
         &mut sky,
         &SkyDef {
-            y: 4700.0,
-            x0: -9200.0,
-            x1: -1400.0,
-            z0: 4000.0,
-            z1: 5700.0,
-            pad: vec3(-9125.0, 1400.0, HP_SPAWN_Z),
-            secs: 2.2,
+            platform: vec3(-800.0, 4700.0, 5320.0),
+            hide: vec3(-900.0, 660.0, fz),
+            secs: 2.0,
             items: &[
                 PickupKind::Attachment(AttItem::Muzzle(Muzzle::Suppressor)),
                 PickupKind::Attachment(AttItem::Sight(Sight::Holo)),
@@ -1658,6 +1620,10 @@ fn surf_ski() -> Map {
         att(AttItem::Grip(Grip::Vertical), -3000.0, SK_SIDE_Y, 2340.0),
         att(AttItem::Muzzle(Muzzle::Compensator), 3000.0, -SK_SIDE_Y, 2340.0),
         att(AttItem::Sight(Sight::RedDot), 3000.0, SK_SIDE_Y, 2340.0),
+        att(AttItem::Sight(Sight::Scope2x), -1500.0, -SK_SIDE_Y, 2340.0),
+        PickupDef { pos: vec3(600.0, SK_SIDE_Y, 2340.0), kind: PickupKind::Ammo },
+        PickupDef { pos: vec3(-600.0, -SK_SIDE_Y, 2340.0), kind: PickupKind::Ammo },
+        PickupDef { pos: vec3(80.0, 0.0, 3424.0), kind: PickupKind::Ammo },
         att(AttItem::Stock(Stock::Light), -3000.0, -SK_SIDE_Y, 2340.0),
         health(-250.0, 1500.0, 1560.0),
         health(250.0, -1500.0, 1560.0),
@@ -1831,6 +1797,9 @@ fn surf_utopia() -> Map {
     let mut pickups = vec![
         gun(WeaponId::Awp, 0.0, 0.0, az + 224.0),
         att(AttItem::Sight(Sight::Acog), 0.0, 0.0, az + 262.0),
+        att(AttItem::Sight(Sight::Scope2x), -900.0, 900.0, az + 136.0),
+        PickupDef { pos: vec3(600.0, 600.0, az + 24.0), kind: PickupKind::Ammo },
+        PickupDef { pos: vec3(-600.0, -600.0, az + 24.0), kind: PickupKind::Ammo },
         health(-600.0, 0.0, az + 24.0),
         health(600.0, 0.0, az + 24.0),
     ];
@@ -1911,6 +1880,264 @@ fn surf_utopia() -> Map {
         fog_color: [0.72, 0.5, 0.5],
         fog_start: 6000.0,
         fog_end: 34000.0,
+        backdrop: Backdrop::City,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// surf_odyssey
+//
+// The big one, over four times the area of surf_hairpin. Each team starts in
+// a castle floating at the far end of the night sky, surfs a very long
+// boosted express ramp, turns 90 degrees into a double helix (the two teams'
+// spirals are interleaved) that winds one and a half times around a giant
+// tower, and comes out on a round arena at its foot. Launch pads throw you
+// from the arena to four floating islands and back. The rare attachments
+// sit on top of the tower; the only way up is a small pad on a thin pillar
+// under the spirals.
+
+const OD_CASTLE_Z: f32 = 9000.0;
+const OD_LANE_Y: f32 = 4000.0;
+const OD_ARENA_Z: f32 = 2700.0;
+const OD_HELIX_R: f32 = 3000.0;
+const OD_TOWER_TOP: f32 = 9000.0;
+/// Express ramp (T side): x0, x1, ridge z0, z1.
+const OD_EXPRESS: (f32, f32, f32, f32) = (-18950.0, -7000.0, 8600.0, 7400.0);
+/// The 90 degree turn onto the helix: centre, radius, ridge z0, z1.
+const OD_TURN: (f32, f32, f32, f32, f32) = (-7000.0, 0.0, 4000.0, 7400.0, 7000.0);
+/// Helix ridge from the top to where it meets the arena.
+const OD_HELIX_Z: (f32, f32) = (7000.0, OD_ARENA_Z + 768.0);
+
+pub fn od_express_ridge(x: f32) -> f32 {
+    let (x0, x1, z0, z1) = OD_EXPRESS;
+    z0 + (z1 - z0) * ((x - x0) / (x1 - x0)).clamp(0.0, 1.0)
+}
+
+fn surf_odyssey() -> Map {
+    let mut b: Vec<Brush> = Vec::new();
+    b.push(cuboid(vec3(-23500.0, -13500.0, -64.0), vec3(23500.0, 13500.0, 0.0), FLOOR));
+    b.push(cuboid(vec3(-23500.0, -13500.0, 0.0), vec3(23500.0, 13500.0, 120.0), WATER));
+    let express = Mat::new(Tex::Grid, [80, 200, 255]);
+    let helix_mat = Mat::new(Tex::Grid, [190, 120, 255]);
+    let stone = Mat::new(Tex::Concrete, [150, 150, 165]);
+    let cz = OD_CASTLE_Z;
+    let ly = OD_LANE_Y;
+    let (tcx, tcy, tr, tz0, tz1) = OD_TURN;
+
+    // T side, rotated 180 degrees for CT.
+    for (s, team_mat, trim) in [(1.0f32, SPAWN_T, TRIM_T), (-1.0, SPAWN_CT, TRIM_CT)] {
+        let r = |p: Vec3| vec3(p.x * s, p.y * s, p.z);
+        let mut local: Vec<Brush> = Vec::new();
+        // the castle
+        local.push(cuboid(
+            vec3(-21000.0, ly - 1000.0, cz - 96.0),
+            vec3(-19000.0, ly + 1000.0, cz),
+            tint(team_mat, express),
+        ));
+        local.push(cuboid(vec3(-21064.0, ly - 1064.0, cz - 96.0), vec3(-21000.0, ly + 1064.0, cz + 480.0), trim));
+        for ys in [-1.0f32, 1.0] {
+            let (a, c) = (ly + ys * 1000.0, ly + ys * 1064.0);
+            local.push(cuboid(vec3(-21000.0, a.min(c), cz - 96.0), vec3(-19400.0, a.max(c), cz + 320.0), trim));
+            // corner towers
+            local.push(block(-20850.0, ly + ys * 850.0, 110.0, cz, cz + 700.0, stone));
+        }
+        local.push(block(-20850.0, ly, 90.0, cz, cz + 900.0, stone));
+        local.push(cuboid(vec3(-20600.0, ly - 1000.0, cz - 1400.0), vec3(-19400.0, ly + 1000.0, cz - 96.0), stone));
+        // express ramp and the turn onto the helix
+        let (x0, x1, z0, z1) = OD_EXPRESS;
+        local.push(ramp_x(x0, x1, ly, z0, z1, 512.0, 768.0, express));
+        turn_ramp(&mut local, vec3(tcx, tcy, 0.0), tr, 90.0, 0.0, tz0, tz1, 512.0, 768.0, 16, express);
+        // the helix: 540 degrees around the tower, down to the arena
+        turn_ramp(
+            &mut local,
+            Vec3::ZERO,
+            OD_HELIX_R,
+            180.0,
+            720.0,
+            OD_HELIX_Z.0,
+            OD_HELIX_Z.1,
+            512.0,
+            768.0,
+            72,
+            helix_mat,
+        );
+        // two floating islands on this team's side
+        for ys in [-1.0f32, 1.0] {
+            let (ix, iy) = (-11000.0, ys * 9000.0);
+            local.push(octa_pillar(ix, iy, 1800.0, 4800.0, 5000.0, stone));
+            local.push(octa_pillar(ix, iy, 900.0, 4200.0, 4800.0, stone));
+            for (dx, dy, h) in
+                [(-500.0, 300.0, 64.0), (400.0, -350.0, 96.0), (600.0, 500.0, 64.0), (-300.0, -600.0, 48.0)]
+            {
+                local.push(block(ix + dx, iy + dy, 48.0, 5000.0, 5000.0 + h, CRATE));
+            }
+            // a ring of bunny hop pillars around the island, open toward the
+            // arena so the launch pads have a way in
+            let to_arena = (-iy).atan2(-ix);
+            for k in 0..10 {
+                let a = k as f32 / 10.0 * std::f32::consts::TAU;
+                let gap =
+                    (a - to_arena + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+                if gap.abs() < 0.6 {
+                    continue;
+                }
+                local.push(block(ix + a.cos() * 1500.0, iy + a.sin() * 1500.0, 40.0, 5000.0, 5100.0, PILLAR_SIDE));
+            }
+        }
+        for br in local {
+            let pts: Vec<Vec3> = br.points.iter().map(|p| r(*p)).collect();
+            b.push(Brush::hull(&pts, br.mat));
+        }
+    }
+
+    // The arena and the tower.
+    let az = OD_ARENA_Z;
+    b.push(octa_pillar(0.0, 0.0, 4400.0, az - 128.0, az, Mat::new(Tex::Concrete, [120, 118, 135])));
+    b.push(octa_pillar(0.0, 0.0, 700.0, 0.0, OD_TOWER_TOP, stone));
+    b.push(octa_pillar(0.0, 0.0, 1300.0, 0.0, az - 128.0, stone));
+    for k in 0..8 {
+        let a = (k as f32 + 0.5) / 8.0 * std::f32::consts::TAU;
+        let (c, sn) = (a.cos(), a.sin());
+        // cover outside the helix, and low walls inside it
+        b.push(block(c * 3950.0, sn * 3950.0, 70.0, az, az + 110.0, CRATE));
+        b.push(block(c * 1650.0, sn * 1650.0, 90.0, az, az + 72.0, METAL));
+    }
+    // the thin pillar with the hidden pad, under the spirals
+    let hide = vec3(1100.0, -1100.0, az + 900.0);
+    b.push(block(hide.x, hide.y, 26.0, az, hide.z, PERCH));
+
+    boundary(&mut b, vec3(23400.0, 13400.0, 0.0), 16000.0);
+
+    let mut spawns: [Vec<Spawn>; 2] = [Vec::new(), Vec::new()];
+    for (ti, s) in [(0usize, 1.0f32), (1, -1.0)] {
+        for x in [-20500.0, -20200.0, -19900.0, -19600.0] {
+            for y in [ly - 600.0, ly, ly + 600.0] {
+                spawns[ti].push(Spawn { pos: vec3(x * s, y * s, cz + 37.0), yaw: if s > 0.0 { 0.0 } else { 180.0 } });
+            }
+        }
+    }
+    let buyzones = [
+        Aabb::new(vec3(-21100.0, ly - 1100.0, cz - 100.0), vec3(-18900.0, ly + 1100.0, cz + 500.0)),
+        Aabb::new(vec3(18900.0, -ly - 1100.0, cz - 100.0), vec3(21100.0, -ly + 1100.0, cz + 500.0)),
+    ];
+
+    let top = OD_TOWER_TOP;
+    let mut pickups = vec![
+        att(AttItem::Sight(Sight::Holo), -200.0, 0.0, top + 24.0),
+        att(AttItem::Sight(Sight::Acog), 0.0, 0.0, top + 24.0),
+        att(AttItem::Muzzle(Muzzle::Suppressor), 200.0, 0.0, top + 24.0),
+        gun(WeaponId::Awp, 0.0, 250.0, top + 24.0),
+        health(-2000.0, 2000.0, az + 24.0),
+        health(2000.0, -2000.0, az + 24.0),
+        PickupDef { pos: vec3(2000.0, 2000.0, az + 24.0), kind: PickupKind::Ammo },
+        PickupDef { pos: vec3(-2000.0, -2000.0, az + 24.0), kind: PickupKind::Ammo },
+        att(AttItem::Sight(Sight::Scope2x), 0.0, 1650.0, az + 96.0),
+    ];
+    let island_items = [
+        (WeaponId::Ak47, AttItem::Grip(Grip::Vertical)),
+        (WeaponId::Scout, AttItem::Sight(Sight::RedDot)),
+        (WeaponId::Ak47, AttItem::Stock(Stock::Heavy)),
+        (WeaponId::Scout, AttItem::Muzzle(Muzzle::Compensator)),
+    ];
+    let islands = [(-11000.0f32, 9000.0f32), (-11000.0, -9000.0), (11000.0, -9000.0), (11000.0, 9000.0)];
+    for (k, (ix, iy)) in islands.iter().enumerate() {
+        let (gunid, item) = island_items[k];
+        pickups.push(gun(gunid, *ix, *iy, 5024.0));
+        pickups.push(att(item, *ix, *iy, 5062.0));
+        pickups.push(health(ix + 300.0, *iy, 5024.0));
+        pickups.push(PickupDef { pos: vec3(ix - 300.0, *iy, 5024.0), kind: PickupKind::Ammo });
+    }
+
+    let mut boosters = Vec::new();
+    for s in [1.0f32, -1.0] {
+        let turn = |a: Aabb| a.turned(s);
+        let (x0, x1, z0, z1) = OD_EXPRESS;
+        let d = vec3(x1 - x0, 0.0, z1 - z0).normalize();
+        for (t0, t1) in [(0.2f32, 0.35f32), (0.6, 0.75)] {
+            let (xa, xb) = (x0 + (x1 - x0) * t0, x0 + (x1 - x0) * t1);
+            let zone = Aabb::new(
+                vec3(xa, ly - 512.0, od_express_ridge(xb) - 768.0),
+                vec3(xb, ly + 512.0, od_express_ridge(xa) + 48.0),
+            );
+            boosters.push(Booster::boost(turn(zone), vec3(d.x * s, 0.0, d.z), 2100.0));
+        }
+    }
+    // Arena <-> island pads.
+    let mut pads = Vec::new();
+    for (ix, iy) in islands {
+        let dir = vec3(ix, iy, 0.0).normalize();
+        let out = dir * 4050.0 + vec3(0.0, 0.0, az);
+        pads.push((out, vec3(ix, iy, 5000.0) - dir * 350.0 + vec3(0.0, 0.0, 60.0), 2.8));
+        let back = vec3(ix, iy, 5000.0) - dir * 1100.0;
+        pads.push((back, dir * 3200.0 + vec3(0.0, 0.0, az + 60.0), 2.4));
+    }
+    add_launchers(&mut b, &mut boosters, &pads);
+    // The hidden pad to the tower top.
+    b.push(cuboid(hide - vec3(22.0, 22.0, 0.0), hide + vec3(22.0, 22.0, 2.0), Mat::new(Tex::Metal, [255, 150, 40])));
+    let mut hidden = Booster::launcher(hide + vec3(0.0, 0.0, 2.0), vec3(0.0, -200.0, top + 60.0), 5.0);
+    hidden.zone = Aabb::new(hide - vec3(26.0, 26.0, 6.0), hide + vec3(26.0, 26.0, 26.0));
+    boosters.push(hidden);
+    let sky = vec![SkyRamp {
+        pad: hide + vec3(0.0, 0.0, 2.0),
+        platform: Aabb::new(vec3(-700.0, -700.0, top - 64.0), vec3(700.0, 700.0, top)),
+    }];
+
+    let teleports =
+        vec![Teleport::to_spawn(Aabb::new(vec3(-23500.0, -13500.0, -300.0), vec3(23500.0, 13500.0, 1400.0)))];
+
+    // Bot routes (T, rotated for CT).
+    let mut routes = Vec::new();
+    let depth = 280.0;
+    let off = depth * 512.0 / 768.0;
+    for (face, name) in [(-1.0f32, "inner"), (1.0f32, "outer")] {
+        let fy = ly + face * off;
+        let mut pts =
+            vec![wp(-19700.0, ly + face * 250.0, cz, WpMode::Walk), wp(-18975.0, ly + face * 250.0, cz, WpMode::Drop)];
+        for x in [-17800.0, -15500.0, -13000.0, -10500.0, -8200.0, -7300.0] {
+            pts.push(wp(x, fy, od_express_ridge(x) - depth, WpMode::Surf));
+        }
+        turn_route(&mut pts, vec3(tcx, tcy, 0.0), tr, 90.0, 0.0, tz0, tz1, depth, 10.0);
+        turn_route(
+            &mut pts,
+            Vec3::ZERO,
+            OD_HELIX_R,
+            180.0,
+            700.0,
+            OD_HELIX_Z.0,
+            OD_HELIX_Z.0 - (OD_HELIX_Z.0 - OD_HELIX_Z.1) * 520.0 / 540.0,
+            depth,
+            15.0,
+        );
+        pts.push(wp(3300.0, 1600.0, az, WpMode::Walk));
+        pts.push(wp(3377.0, 1950.0, az, WpMode::Hold));
+        routes.push(Route { team: Team::T, kind: RouteKind::Surf, name: format!("odyssey {name}"), points: pts });
+    }
+    let mut rotated: Vec<Route> = routes.iter().map(rotate_route).collect();
+    // Mirror images of the T spots would face each other straight through
+    // the tower; CT holds a quarter turn round so the two can see each other.
+    for r in rotated.iter_mut() {
+        if let Some(last) = r.points.last_mut() {
+            last.pos = vec3(-1950.0, -3377.0, az);
+        }
+    }
+    routes.extend(rotated);
+
+    Map {
+        name: "surf_odyssey".into(),
+        world: CollisionWorld::new(b),
+        spawns,
+        kill_z: 450.0,
+        buyzones,
+        pickups,
+        boosters,
+        teleports,
+        sky,
+        routes,
+        sky_top: [0.02, 0.03, 0.1],
+        sky_horizon: [0.24, 0.22, 0.42],
+        fog_color: [0.16, 0.16, 0.28],
+        fog_start: 8000.0,
+        fog_end: 48000.0,
         backdrop: Backdrop::City,
     }
 }
