@@ -35,9 +35,19 @@ pub enum Sfx {
     Deploy,
     Wind,
     Hum,
+    Laser,
+    RocketFire,
+    Explosion,
+    Silenced,
+    HealthPickup,
 }
 
-const ALL: [Sfx; 24] = [
+const ALL: [Sfx; 29] = [
+    Sfx::Laser,
+    Sfx::RocketFire,
+    Sfx::Explosion,
+    Sfx::Silenced,
+    Sfx::HealthPickup,
     Sfx::Usp,
     Sfx::Mp5,
     Sfx::M3,
@@ -369,6 +379,62 @@ fn synth(sfx: Sfx) -> Vec<f32> {
             normalize(&mut out, 0.8);
             out
         }
+        Sfx::Laser => {
+            let mut out = buf(0.18);
+            let mut phase = 0.0f32;
+            let n = out.len();
+            for (i, x) in out.iter_mut().enumerate() {
+                let k = i as f32 / n as f32;
+                phase += (2600.0 - 1900.0 * k) / RATE as f32 * std::f32::consts::TAU;
+                *x = (phase.sin() + 0.4 * (phase * 2.01).sin()) * (1.0 - k).powi(2);
+            }
+            normalize(&mut out, 0.45);
+            out
+        }
+        Sfx::RocketFire => {
+            let mut out = buf(0.7);
+            let mut lp = Lp::new(900.0);
+            let n = out.len();
+            for (i, x) in out.iter_mut().enumerate() {
+                let k = i as f32 / n as f32;
+                lp.set(400.0 + 2500.0 * (1.0 - k));
+                let env = if k < 0.05 { k / 0.05 } else { (1.0 - k).powf(1.5) };
+                *x = lp.run(rng.range(-1.0, 1.0)) * env;
+            }
+            thud(&mut out, 0.0, 70.0, 0.05, 0.6, &mut rng);
+            normalize(&mut out, 0.7);
+            out
+        }
+        Sfx::Explosion => gunshot(
+            Gun { dur: 2.2, crack: 0.02, body_hz: 45.0, body_decay: 0.25, tail: 0.6, cutoff: 1200.0, drive: 3.5 },
+            9,
+        ),
+        Sfx::Silenced => {
+            let mut out = buf(0.2);
+            let mut lp = Lp::new(1800.0);
+            for (i, x) in out.iter_mut().enumerate() {
+                let t = i as f32 / RATE as f32;
+                *x = lp.run(rng.range(-1.0, 1.0)) * (-t / 0.02).exp();
+            }
+            click(&mut out, 0.0, 1400.0, 0.5, &mut rng);
+            normalize(&mut out, 0.35);
+            out
+        }
+        Sfx::HealthPickup => {
+            let mut out = buf(0.45);
+            for (at, f) in [(0.0, 660.0), (0.12, 990.0)] {
+                let start = (at * RATE as f32) as usize;
+                for i in 0..(0.3 * RATE as f32) as usize {
+                    if start + i >= out.len() {
+                        break;
+                    }
+                    let t = i as f32 / RATE as f32;
+                    out[start + i] += (t * f * std::f32::consts::TAU).sin() * (-t / 0.1).exp();
+                }
+            }
+            normalize(&mut out, 0.35);
+            out
+        }
         Sfx::Hum => {
             let mut out = buf(1.0);
             for (i, s) in out.iter_mut().enumerate() {
@@ -487,19 +553,33 @@ impl Audio {
     pub fn handle_events(&mut self, game: &Game, events: &[Event], listener: Vec3, local: Option<usize>) {
         for e in events {
             match e {
-                Event::Shot { player, weapon, pos } => {
+                Event::Shot { player, weapon, pos, silenced } => {
                     let own = Some(*player) == local;
-                    let (sfx, range, base) = match weapon {
-                        WeaponId::Usp => (Sfx::Usp, 3500.0, 0.8),
-                        WeaponId::Mp5 => (Sfx::Mp5, 3500.0, 0.7),
-                        WeaponId::M3 => (Sfx::M3, 5000.0, 1.0),
-                        WeaponId::Ak47 => (Sfx::Ak47, 5000.0, 0.9),
-                        WeaponId::Scout => (Sfx::Scout, 7000.0, 0.95),
-                        WeaponId::Awp => (Sfx::Awp, 9000.0, 1.0),
-                        WeaponId::Knife => continue,
+                    let (sfx, range, base) = if *silenced && *weapon != WeaponId::Rocket {
+                        (Sfx::Silenced, 1200.0, 0.8)
+                    } else {
+                        match weapon {
+                            WeaponId::Laser => (Sfx::Laser, 3000.0, 0.7),
+                            WeaponId::Rocket => (Sfx::RocketFire, 4000.0, 0.9),
+                            WeaponId::Usp => (Sfx::Usp, 3500.0, 0.8),
+                            WeaponId::Mp5 => (Sfx::Mp5, 3500.0, 0.7),
+                            WeaponId::M3 => (Sfx::M3, 5000.0, 1.0),
+                            WeaponId::Ak47 => (Sfx::Ak47, 5000.0, 0.9),
+                            WeaponId::Scout => (Sfx::Scout, 7000.0, 0.95),
+                            WeaponId::Awp => (Sfx::Awp, 9000.0, 1.0),
+                            WeaponId::Knife => continue,
+                        }
                     };
                     let v = if own { base } else { self.at(listener, *pos, base * 0.8, range) };
                     self.play(sfx, v);
+                }
+                Event::Explosion { pos } => {
+                    self.play(Sfx::Explosion, self.at(listener, *pos, 1.0, 7000.0));
+                }
+                Event::PickupTaken { player, health, .. } => {
+                    if Some(*player) == local {
+                        self.play(if *health { Sfx::HealthPickup } else { Sfx::Pickup }, 0.8);
+                    }
                 }
                 Event::KnifeSwing { player, hit } => {
                     let pos = game.players[*player].pm.origin;

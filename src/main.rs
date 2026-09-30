@@ -3,9 +3,11 @@
 mod audio;
 mod bot;
 mod collision;
+mod editor;
 mod game;
 mod hud;
 mod map;
+mod mapfile;
 mod pmove;
 mod render;
 mod util;
@@ -19,7 +21,7 @@ use macroquad::prelude::*;
 use crate::audio::Audio;
 use crate::bot::Difficulty;
 use crate::game::{Game, Mode, Settings, TICK, TICK_MSEC};
-use crate::hud::{text_centered, text_shadow, text_width, HUD_COLOR};
+use crate::hud::{text, text_centered, text_shadow, text_width, HUD_COLOR};
 use crate::map::Team;
 use crate::pmove::*;
 use crate::render::{Renderer, View};
@@ -145,7 +147,13 @@ impl Options {
                     "bots_t" => o.settings.bots_t = v.parse().unwrap_or(o.settings.bots_t),
                     "bots_ct" => o.settings.bots_ct = v.parse().unwrap_or(o.settings.bots_ct),
                     "team" => o.team_choice = v.parse().unwrap_or(o.team_choice),
-                    "autobhop" => o.settings.autobhop = v == "1",
+                    "autobhop" => o.settings.vars.autobhop = v == "1",
+                    "bhop_cap" => o.settings.vars.bhop_cap = v == "1",
+                    "sv_airaccelerate" => o.settings.vars.airaccelerate = v.parse().unwrap_or(100.0),
+                    "sv_gravity" => o.settings.vars.gravity = v.parse().unwrap_or(800.0),
+                    "sv_maxvelocity" => o.settings.vars.maxvelocity = v.parse().unwrap_or(3500.0),
+                    "sv_accelerate" => o.settings.vars.accelerate = v.parse().unwrap_or(5.0),
+                    "sv_friction" => o.settings.vars.friction = v.parse().unwrap_or(4.0),
                     "ramp_accuracy" => o.settings.ramp_accuracy = v == "1",
                     "deathmatch" => o.settings.mode = if v == "1" { Mode::Deathmatch } else { Mode::Rounds },
                     "difficulty" => {
@@ -166,7 +174,7 @@ impl Options {
     fn save(&self) {
         let s = &self.settings;
         let text = format!(
-            "sensitivity {}\nvolume {}\nname \"{}\"\nmap {}\nbots_t {}\nbots_ct {}\nteam {}\nautobhop {}\ndeathmatch {}\ndifficulty {}\nramp_accuracy {}\n",
+            "sensitivity {}\nvolume {}\nname \"{}\"\nmap {}\nbots_t {}\nbots_ct {}\nteam {}\nautobhop {}\ndeathmatch {}\ndifficulty {}\nramp_accuracy {}\nbhop_cap {}\nsv_airaccelerate {}\nsv_gravity {}\nsv_maxvelocity {}\nsv_accelerate {}\nsv_friction {}\n",
             self.sensitivity,
             self.volume,
             s.player_name,
@@ -174,10 +182,16 @@ impl Options {
             s.bots_t,
             s.bots_ct,
             self.team_choice,
-            if s.autobhop { 1 } else { 0 },
+            if s.vars.autobhop { 1 } else { 0 },
             if s.mode == Mode::Deathmatch { 1 } else { 0 },
             s.difficulty.name().to_lowercase(),
             if s.ramp_accuracy { 1 } else { 0 },
+            if s.vars.bhop_cap { 1 } else { 0 },
+            s.vars.airaccelerate,
+            s.vars.gravity,
+            s.vars.maxvelocity,
+            s.vars.accelerate,
+            s.vars.friction,
         );
         let _ = std::fs::write(Self::path(), text);
     }
@@ -210,6 +224,94 @@ impl Ui {
     }
 }
 
+/// The surf movement settings with presets. Returns true if anything changed.
+fn movement_panel(ui: &Ui, vars: &mut MoveVars, x: f32, y: f32, w: f32) -> bool {
+    let s = ui.scale;
+    let h = 34.0 * s;
+    let step = h * 1.18;
+    let rows = 9.0;
+    draw_rectangle(x - 10.0 * s, y - 40.0 * s, w + 20.0 * s, step * rows + 56.0 * s, Color::new(0.0, 0.0, 0.0, 0.6));
+    text_shadow("Movement settings", x, y - 12.0 * s, 24.0 * s, HUD_COLOR);
+    let mut changed = false;
+    let mut yy = y;
+    let presets: [(&str, MoveVars); 3] = [
+        ("Surf server", MoveVars::surf_server()),
+        ("Easy surf", MoveVars::easy_surf()),
+        ("CS stock", MoveVars::stock()),
+    ];
+    let current = presets
+        .iter()
+        .find(|(_, p)| {
+            p.airaccelerate == vars.airaccelerate
+                && p.gravity == vars.gravity
+                && p.maxvelocity == vars.maxvelocity
+                && p.accelerate == vars.accelerate
+                && p.friction == vars.friction
+                && p.bhop_cap == vars.bhop_cap
+        })
+        .map(|(n, _)| *n)
+        .unwrap_or("Custom");
+    if ui.button(&format!("Preset: {current}"), x, yy, w, h) {
+        let i = presets.iter().position(|(n, _)| *n == current).map(|i| i + 1).unwrap_or(0) % presets.len();
+        let auto = vars.autobhop;
+        *vars = presets[i].1;
+        if presets[i].0 != "Easy surf" {
+            vars.autobhop = auto;
+        }
+        changed = true;
+    }
+    yy += step;
+    // label, value, steps
+    let row = |label: &str, val: &mut f32, steps: &[f32], yy: f32| -> bool {
+        let bw = h * 1.2;
+        text_shadow(&format!("{label}: {}", *val), x, yy + h * 0.68, 20.0 * s, WHITE);
+        let i = steps.iter().position(|v| *v >= *val - 0.001).unwrap_or(steps.len() - 1);
+        let mut c = false;
+        if ui.button("-", x + w - bw * 2.0 - 6.0 * s, yy, bw, h) && i > 0 {
+            *val = steps[i - 1];
+            c = true;
+        }
+        if ui.button("+", x + w - bw, yy, bw, h) && i + 1 < steps.len() {
+            *val = if steps[i] > *val + 0.001 { steps[i] } else { steps[i + 1] };
+            c = true;
+        }
+        c
+    };
+    changed |=
+        row("sv_airaccelerate", &mut vars.airaccelerate, &[10.0, 50.0, 100.0, 150.0, 200.0, 300.0, 500.0, 1000.0], yy);
+    yy += step;
+    let grav: Vec<f32> = (6..=24).map(|i| i as f32 * 50.0).collect();
+    changed |= row("sv_gravity", &mut vars.gravity, &grav, yy);
+    yy += step;
+    let maxv: Vec<f32> = (4..=20).map(|i| i as f32 * 500.0).collect();
+    changed |= row("sv_maxvelocity", &mut vars.maxvelocity, &maxv, yy);
+    yy += step;
+    let acc: Vec<f32> = (1..=20).map(|i| i as f32).collect();
+    changed |= row("sv_accelerate", &mut vars.accelerate, &acc, yy);
+    yy += step;
+    let fr: Vec<f32> = (0..=10).map(|i| i as f32).collect();
+    changed |= row("sv_friction", &mut vars.friction, &fr, yy);
+    yy += step;
+    if ui.button(&format!("Auto bunnyhop: {}", if vars.autobhop { "On" } else { "Off" }), x, yy, w, h) {
+        vars.autobhop = !vars.autobhop;
+        changed = true;
+    }
+    yy += step;
+    if ui.button(&format!("Bunnyhop speed cap: {}", if vars.bhop_cap { "On (stock CS)" } else { "Off" }), x, yy, w, h) {
+        vars.bhop_cap = !vars.bhop_cap;
+        changed = true;
+    }
+    yy += step;
+    text(
+        "Higher airaccelerate and lower gravity make ramps more forgiving.",
+        x,
+        yy + 14.0 * s,
+        15.0 * s,
+        Color::new(0.85, 0.85, 0.85, 1.0),
+    );
+    changed
+}
+
 // ---------------------------------------------------------------------------
 // App
 
@@ -217,6 +319,7 @@ impl Ui {
 enum Screen {
     Menu,
     Playing,
+    Editor,
 }
 
 struct App {
@@ -231,6 +334,12 @@ struct App {
     paused: bool,
     third_person: bool,
     buy_menu: bool,
+    buy_page: u8,
+    show_move_panel: bool,
+    menu_map_changed: bool,
+    editor: Option<editor::Editor>,
+    /// Test playing a map from the editor.
+    from_editor: bool,
     spec_target: usize,
     spec_first_person: bool,
     wheel_jumps: u32,
@@ -272,7 +381,49 @@ fn menu_game(map: &str) -> Game {
 }
 
 impl App {
+    fn open_editor(&mut self) {
+        let name = self.opts.settings.map.clone();
+        let ed = editor::Editor::new(Some(&name));
+        self.renderer = Renderer::new(&ed.game);
+        self.editor = Some(ed);
+        self.screen = Screen::Editor;
+        self.from_editor = false;
+        self.grab(false);
+    }
+
+    fn frame_editor(&mut self, dt: f32) {
+        let Some(ed) = self.editor.as_mut() else {
+            self.go_menu();
+            return;
+        };
+        match ed.frame(&mut self.renderer, dt) {
+            editor::EditorAction::None => {}
+            editor::EditorAction::Exit => {
+                self.editor = None;
+                self.go_menu();
+            }
+            editor::EditorAction::Play(map) => {
+                self.start_match_on(Some(*map));
+                self.from_editor = true;
+            }
+        }
+    }
+
+    fn back_to_editor(&mut self) {
+        if let Some(ed) = self.editor.as_ref() {
+            self.renderer = Renderer::new(&ed.game);
+        }
+        self.screen = Screen::Editor;
+        self.paused = false;
+        self.grab(false);
+    }
+
     fn new_match(&mut self) {
+        self.from_editor = false;
+        self.start_match_on(None);
+    }
+
+    fn start_match_on(&mut self, map: Option<map::Map>) {
         let mut s = self.opts.settings.clone();
         // Auto team: join the team with fewer players.
         s.player_team = match self.opts.team_choice {
@@ -283,7 +434,10 @@ impl App {
             s.player_team = Some(t);
         }
         let seed = (get_time() * 1000.0) as u64 ^ 0x5eed;
-        self.game = Game::new(s, seed);
+        self.game = match map {
+            Some(m) => Game::with_map(m, s, seed),
+            None => Game::new(s, seed),
+        };
         self.renderer = Renderer::new(&self.game);
         self.acc = 0.0;
         self.view = self.game.local_player().map(|p| p.angles).unwrap_or(Vec3::ZERO);
@@ -393,17 +547,33 @@ impl App {
         }
         if is_key_pressed(KeyCode::B) {
             self.buy_menu = !self.buy_menu;
+            self.buy_page = 0;
         }
         let alive = self.game.players[li].alive;
         if self.buy_menu {
-            let keys = [KeyCode::Key1, KeyCode::Key2, KeyCode::Key3, KeyCode::Key4, KeyCode::Key5, KeyCode::Key6];
-            for (i, k) in keys.iter().enumerate() {
-                if is_key_pressed(*k) && self.game.buy(li, ALL_BUYABLE[i]) {
+            let keys = [KeyCode::Key1, KeyCode::Key2, KeyCode::Key3, KeyCode::Key4];
+            if self.buy_page == 0 {
+                for (i, id) in ALL_BUYABLE.iter().enumerate() {
+                    if is_key_pressed(keys[i]) && self.game.buy(li, *id) {
+                        self.buy_menu = false;
+                    }
+                }
+                if is_key_pressed(KeyCode::Key4) && self.game.players[li].weapon().is_some() {
+                    self.buy_page = 1;
+                }
+                if is_key_pressed(KeyCode::Key0) {
                     self.buy_menu = false;
                 }
-            }
-            if is_key_pressed(KeyCode::Key0) {
-                self.buy_menu = false;
+            } else {
+                let back = is_key_down(KeyCode::LeftShift);
+                for (cat, k) in keys.iter().enumerate() {
+                    if is_key_pressed(*k) {
+                        self.game.customize(li, cat, if back { -1 } else { 1 });
+                    }
+                }
+                if is_key_pressed(KeyCode::Key0) {
+                    self.buy_page = 0;
+                }
             }
             return;
         }
@@ -543,15 +713,20 @@ impl App {
                     (self.chase_view(t, self.view, 150.0, alpha), false)
                 }
             }
-            None => (
-                View {
-                    pos: vec3(-5200.0, -3600.0, 4200.0),
-                    angles: vec3(28.0, 35.0, 0.0),
-                    fov: 90.0,
-                    first_person: None,
-                },
-                false,
-            ),
+            None => {
+                // Overview: look at the whole map from a corner.
+                let mut lo = Vec3::splat(f32::MAX);
+                let mut hi = Vec3::splat(f32::MIN);
+                for br in g.map.world.brushes.iter().filter(|b| b.mat.visible() && (b.maxs - b.mins).x < 9000.0) {
+                    lo = lo.min(br.mins);
+                    hi = hi.max(br.maxs);
+                }
+                let c = (lo + hi) * 0.5;
+                let e = (hi - lo) * 0.5;
+                let pos = vec3(c.x - e.x * 1.05, c.y - e.y * 1.25, hi.z + e.x.max(e.y) * 0.45);
+                let (pitch, yaw) = util::vec_to_angles(c - pos);
+                (View { pos, angles: vec3(pitch, yaw, 0.0), fov: 90.0, first_person: None }, false)
+            }
         }
     }
 
@@ -630,6 +805,7 @@ impl App {
                 || self.game.phase == game::Phase::Over
                 || self.args.ui.as_deref() == Some("scores"),
             buy_menu: self.buy_menu,
+            buy_page: self.buy_page,
             view_angles: if fp { view.angles } else { self.view },
             third_person: !fp,
             fps: self.fps,
@@ -682,7 +858,12 @@ impl App {
             self.grab(true);
         }
         y += h * 1.3;
-        if ui.button("Restart match", x, y, w, h) {
+        if self.from_editor {
+            if ui.button("Back to editor", x, y, w, h) {
+                self.back_to_editor();
+                return;
+            }
+        } else if ui.button("Restart match", x, y, w, h) {
             self.new_match();
             return;
         }
@@ -695,6 +876,18 @@ impl App {
         if ui.button("Quit", x, y, w, h) {
             self.opts.save();
             std::process::exit(0);
+        }
+        y += h * 1.3;
+        if ui.button("Movement settings", x, y, w, h) {
+            self.show_move_panel = !self.show_move_panel;
+        }
+        if self.show_move_panel {
+            let px = (x + w + 40.0 * s).min(sw - 480.0 * s);
+            if movement_panel(&ui, &mut self.opts.settings.vars, px, sh * 0.34, 440.0 * s) {
+                self.game.vars = self.opts.settings.vars;
+                self.game.settings.vars = self.opts.settings.vars;
+                self.opts.save();
+            }
         }
         y += h * 1.8;
         let sens = format!("Sensitivity: {:.1}   (- / + keys)", self.opts.sensitivity);
@@ -717,6 +910,11 @@ impl App {
     }
 
     fn frame_menu(&mut self, dt: f32) {
+        if self.menu_map_changed {
+            self.menu_map_changed = false;
+            self.game = menu_game(&self.opts.settings.map);
+            self.renderer.rebuild_world(&self.game);
+        }
         // Background: a live bot match with a camera chasing a surfer.
         self.simulate(dt);
         let g = &self.game;
@@ -779,9 +977,13 @@ impl App {
         let step = h * 1.22;
         let o = &mut self.opts;
         let maps = map::map_names();
+        if !maps.contains(&o.settings.map) {
+            o.settings.map = maps[0].clone();
+        }
         if ui.button(&format!("Map: {}", o.settings.map), x, y, w, h) {
             let i = maps.iter().position(|m| *m == o.settings.map).unwrap_or(0);
             o.settings.map = maps[(i + 1) % maps.len()].to_string();
+            self.menu_map_changed = true;
         }
         y += step;
         let teams = ["Terrorists", "Counter-Terrorists", "Auto assign", "Spectate"];
@@ -812,15 +1014,11 @@ impl App {
             };
         }
         y += step;
-        if ui.button(
-            &format!("Auto bunnyhop: {}", if o.settings.autobhop { "On" } else { "Off (CS default)" }),
-            x,
-            y,
-            w,
-            h,
-        ) {
-            o.settings.autobhop = !o.settings.autobhop;
+        let label = if self.show_move_panel { "Movement settings  <<" } else { "Movement settings  >>" };
+        if ui.button(label, x, y, w, h) {
+            self.show_move_panel = !self.show_move_panel;
         }
+        let o = &mut self.opts;
         y += step;
         let acc = if o.settings.ramp_accuracy { "Surf (ramps = ground)" } else { "Classic CS (ramps = air)" };
         if ui.button(&format!("Ramp accuracy: {acc}"), x, y, w, h) {
@@ -841,9 +1039,22 @@ impl App {
             return;
         }
         y += h * 1.3 + 12.0 * s;
-        if ui.button("Quit", x, y, w, h) {
+        if ui.button("Map editor", x, y, w * 0.6, h) {
+            self.opts.save();
+            self.open_editor();
+            return;
+        }
+        if ui.button("Quit", x + w * 0.62, y, w * 0.38, h) {
             self.opts.save();
             std::process::exit(0);
+        }
+
+        if self.show_move_panel {
+            let px = sw * 0.44 + 20.0 * s;
+            if movement_panel(&ui, &mut self.opts.settings.vars, px, 180.0 * s, 460.0 * s) {
+                self.opts.save();
+            }
+            return;
         }
 
         // Controls.
@@ -853,7 +1064,8 @@ impl App {
             "CTRL  duck        SHIFT  walk",
             "MOUSE1 fire       MOUSE2 scope / stab",
             "1 2 3  weapons    Q  last weapon   R  reload",
-            "B  buy menu       G  drop   TAB  scores",
+            "B  buy menu / attachments   G  drop   TAB  scores",
+            "E  swap your gun for a map weapon",
             "V  third person (see your board)   ESC  menu",
             "",
             "Surfing: look along the ramp and hold the",
@@ -913,12 +1125,34 @@ async fn main() {
         fps_acc: 0.0,
         fps_frames: 0,
         was_alive: true,
+        buy_page: 0,
+        show_move_panel: false,
+        menu_map_changed: false,
+        editor: None,
+        from_editor: false,
         args: args.clone(),
     };
     app.audio.volume = app.opts.volume;
 
     // Screenshot mode: optionally start a match, fast forward and capture.
     if let Some(path) = args.shot.clone() {
+        if args.ui.as_deref() == Some("editor") {
+            app.open_editor();
+            if let Some(ed) = app.editor.as_mut() {
+                ed.debug_select_first_ramp();
+            }
+            for frame in 0..3 {
+                clear_background(BLACK);
+                app.frame_editor(0.016);
+                if frame == 2 {
+                    take_screenshot_and_exit(&path).await;
+                }
+                next_frame().await;
+            }
+        }
+        if args.ui.as_deref() == Some("movement") {
+            app.show_move_panel = true;
+        }
         if !args.menu {
             if args.cam.as_deref() == Some("spectate") {
                 app.opts.team_choice = 3;
@@ -984,6 +1218,30 @@ async fn main() {
         match args.ui.as_deref() {
             Some("buy") => app.buy_menu = true,
             Some("pause") => app.paused = true,
+            Some("attach") | Some("laser") | Some("rocket") => {
+                if let Some(li) = app.game.local {
+                    use weapons::*;
+                    let id = match args.ui.as_deref() {
+                        Some("laser") => WeaponId::Laser,
+                        Some("rocket") => WeaponId::Rocket,
+                        _ => WeaponId::Mp5,
+                    };
+                    let att = Attachments {
+                        sight: Sight::RedDot,
+                        muzzle: Muzzle::Suppressor,
+                        stock: Stock::Light,
+                        grip: Grip::Vertical,
+                    };
+                    let p = &mut app.game.players[li];
+                    p.primary = Some(Weapon::with(id, att));
+                    p.active = Slot::Primary;
+                    p.deploy_time = -10.0;
+                    if args.ui.as_deref() == Some("attach") {
+                        app.buy_menu = true;
+                        app.buy_page = 1;
+                    }
+                }
+            }
             Some("scope") => {
                 if let Some(li) = app.game.local {
                     let p = &mut app.game.players[li];
@@ -1020,6 +1278,7 @@ async fn main() {
         match app.screen {
             Screen::Menu => app.frame_menu(dt),
             Screen::Playing => app.frame_playing(dt),
+            Screen::Editor => app.frame_editor(dt),
         }
         next_frame().await;
     }

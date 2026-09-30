@@ -5,6 +5,7 @@
 use macroquad::math::{vec3, Vec3};
 
 use crate::collision::{Brush, CollisionWorld};
+use crate::weapons::WeaponId;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Team {
@@ -132,13 +133,54 @@ pub struct Route {
     pub points: Vec<Waypoint>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PickupKind {
+    Health,
+    Weapon(WeaponId),
+}
+
+impl PickupKind {
+    pub fn key(self) -> &'static str {
+        match self {
+            PickupKind::Health => "health",
+            PickupKind::Weapon(w) => w.key(),
+        }
+    }
+
+    pub fn from_key(k: &str) -> Option<PickupKind> {
+        if k == "health" {
+            Some(PickupKind::Health)
+        } else {
+            WeaponId::from_key(k).map(PickupKind::Weapon)
+        }
+    }
+
+    /// Seconds until a taken pickup comes back.
+    pub fn respawn(self) -> f64 {
+        match self {
+            PickupKind::Health => 15.0,
+            PickupKind::Weapon(_) => 25.0,
+        }
+    }
+}
+
+/// A pickup spawner placed in the map.
+#[derive(Clone, Copy, Debug)]
+pub struct PickupDef {
+    pub pos: Vec3,
+    pub kind: PickupKind,
+}
+
+pub const PICKUP_HALF: f32 = 20.0;
+
 pub struct Map {
-    pub name: &'static str,
+    pub name: String,
     pub world: CollisionWorld,
     pub spawns: [Vec<Spawn>; 2],
-    /// Falling into one of these sends you back to your team spawn.
-    pub teleports: Vec<Aabb>,
+    /// Falling below this height sends you back to your team spawn.
+    pub kill_z: f32,
     pub buyzones: [Aabb; 2],
+    pub pickups: Vec<PickupDef>,
     pub routes: Vec<Route>,
     pub sky_top: [f32; 3],
     pub sky_horizon: [f32; 3],
@@ -148,6 +190,27 @@ pub struct Map {
 }
 
 impl Map {
+    pub fn in_kill_zone(&self, origin: Vec3, mins: Vec3) -> bool {
+        origin.z + mins.z < self.kill_z
+    }
+
+    /// Buy zones around each team's spawn points (used for custom maps).
+    pub fn buyzones_from_spawns(spawns: &[Vec<Spawn>; 2]) -> [Aabb; 2] {
+        let zone = |list: &Vec<Spawn>| {
+            if list.is_empty() {
+                return Aabb::new(Vec3::splat(1e9), Vec3::splat(1e9));
+            }
+            let mut lo = Vec3::splat(f32::MAX);
+            let mut hi = Vec3::splat(f32::MIN);
+            for sp in list {
+                lo = lo.min(sp.pos);
+                hi = hi.max(sp.pos);
+            }
+            Aabb::new(lo - vec3(400.0, 400.0, 150.0), hi + vec3(400.0, 400.0, 300.0))
+        };
+        [zone(&spawns[0]), zone(&spawns[1])]
+    }
+
     pub fn random_spawn(&self, team: Team, taken: &[Vec3], seed: usize) -> Spawn {
         let list = &self.spawns[team.index()];
         for i in 0..list.len() {
@@ -156,18 +219,34 @@ impl Map {
                 return s;
             }
         }
+        if list.is_empty() {
+            return Spawn { pos: vec3(0.0, 0.0, 200.0), yaw: 0.0 };
+        }
         list[seed % list.len()]
     }
 }
 
-pub fn map_names() -> &'static [&'static str] {
-    &["surf_wars", "surf_canyon"]
+pub const BUILTIN_MAPS: [&str; 3] = ["surf_wars", "surf_canyon", "surf_hairpin"];
+
+/// Built-in maps followed by the custom maps saved with the editor.
+pub fn map_names() -> Vec<String> {
+    let mut v: Vec<String> = BUILTIN_MAPS.iter().map(|s| s.to_string()).collect();
+    v.extend(crate::mapfile::list_custom());
+    v
 }
 
 pub fn load(name: &str) -> Map {
     match name {
+        "surf_wars" => surf_wars(),
         "surf_canyon" => surf_canyon(),
-        _ => surf_wars(),
+        "surf_hairpin" => surf_hairpin(),
+        _ => match crate::mapfile::load(name) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("could not load map {name}: {e}");
+                surf_wars()
+            }
+        },
     }
 }
 
@@ -179,7 +258,8 @@ const LANE_HEIGHT: f32 = 768.0; // 56.3 degree faces, normal.z = 0.555
 
 /// A surf ramp segment: a triangular prism running along X whose ridge goes
 /// from `z0` at `x0` to `z1` at `x1`.
-fn ramp_x(x0: f32, x1: f32, yc: f32, z0: f32, z1: f32, hw: f32, h: f32, mat: Mat) -> Brush {
+#[allow(clippy::too_many_arguments)]
+pub fn ramp_x(x0: f32, x1: f32, yc: f32, z0: f32, z1: f32, hw: f32, h: f32, mat: Mat) -> Brush {
     Brush::hull(
         &[
             vec3(x0, yc, z0),
@@ -194,7 +274,8 @@ fn ramp_x(x0: f32, x1: f32, yc: f32, z0: f32, z1: f32, hw: f32, h: f32, mat: Mat
 }
 
 /// Same as [`ramp_x`] but running along Y.
-fn ramp_y(y0: f32, y1: f32, xc: f32, z0: f32, z1: f32, hw: f32, h: f32, mat: Mat) -> Brush {
+#[allow(clippy::too_many_arguments)]
+pub fn ramp_y(y0: f32, y1: f32, xc: f32, z0: f32, z1: f32, hw: f32, h: f32, mat: Mat) -> Brush {
     Brush::hull(
         &[
             vec3(xc, y0, z0),
@@ -256,6 +337,33 @@ fn mirror_route(r: &Route) -> Route {
     }
 }
 
+/// Point reflection through the map centre, for maps that are symmetric
+/// under a 180 degree rotation instead of a mirror.
+fn rotate_route(r: &Route) -> Route {
+    Route {
+        team: r.team.other(),
+        kind: r.kind,
+        name: r.name.clone(),
+        points: r.points.iter().map(|w| Waypoint { pos: vec3(-w.pos.x, -w.pos.y, w.pos.z), mode: w.mode }).collect(),
+    }
+}
+
+fn health(x: f32, y: f32, z: f32) -> PickupDef {
+    PickupDef { pos: vec3(x, y, z), kind: PickupKind::Health }
+}
+
+fn gun(w: WeaponId, x: f32, y: f32, z: f32) -> PickupDef {
+    PickupDef { pos: vec3(x, y, z), kind: PickupKind::Weapon(w) }
+}
+
+/// A row of tiny pillars ending in a small perch: the hard to reach spots.
+fn perch_line(b: &mut Vec<Brush>, pts: &[(f32, f32)], perch: (f32, f32), top: f32, mat: Mat) {
+    for &(x, y) in pts {
+        b.push(block(x, y, 20.0, top - 160.0, top, mat));
+    }
+    b.push(block(perch.0, perch.1, 48.0, top - 200.0, top, mat));
+}
+
 fn wp(x: f32, y: f32, z: f32, mode: WpMode) -> Waypoint {
     Waypoint { pos: vec3(x, y, z), mode }
 }
@@ -275,6 +383,9 @@ const CRATE: Mat = Mat::new(Tex::Crate, [200, 160, 105]);
 const WATER: Mat = Mat::new(Tex::Water, [40, 110, 150]);
 const FLOOR: Mat = Mat::new(Tex::Grid, [70, 75, 85]);
 const CLIP: Mat = Mat::new(Tex::Clip, [0, 0, 0]);
+const PERCH: Mat = Mat::new(Tex::Metal, [230, 90, 90]);
+const RAMP_D: Mat = Mat::new(Tex::Grid, [90, 210, 150]);
+const RAMP_E: Mat = Mat::new(Tex::Grid, [230, 200, 80]);
 
 fn boundary(brushes: &mut Vec<Brush>, ext: Vec3, top: f32) {
     let t = 64.0;
@@ -308,6 +419,32 @@ pub fn sw_ridge(x: f32) -> f32 {
     } else {
         SW_VALLEY_Z + (SW_END_Z - SW_VALLEY_Z) * (ax - 500.0) / 2900.0
     }
+}
+
+/// Middle pillar line (CT side, positive x): (x, y, top).
+fn sw_mid_pillars() -> Vec<(f32, f32, f32)> {
+    let n = 15;
+    (0..n)
+        .map(|i| {
+            let t = i as f32 / (n - 1) as f32;
+            let x = 3350.0 - t * (3350.0 - 880.0);
+            let y = if i % 2 == 0 { 60.0 } else { -60.0 };
+            (x, y, SW_SPAWN_Z)
+        })
+        .collect()
+}
+
+/// Side pillar path toward a tower (CT side, positive x).
+fn sw_side_pillars(ys: f32) -> Vec<(f32, f32, f32)> {
+    let n = 21;
+    (0..n)
+        .map(|i| {
+            let t = i as f32 / (n - 1) as f32;
+            let x = 3850.0 - t * (3850.0 - 420.0);
+            let y = ys * (2050.0 + if i % 2 == 0 { 50.0 } else { -50.0 });
+            (x, y, SW_SPAWN_Z)
+        })
+        .collect()
 }
 
 fn surf_wars() -> Map {
@@ -382,24 +519,15 @@ fn surf_wars() -> Map {
         }
         b.push(block(fx(3800.0), 450.0, 24.0, SW_SPAWN_Z + 64.0, SW_SPAWN_Z + 112.0, CRATE));
 
-        // Middle bunny hop line: descending pillars from the spawn to the island.
-        let n = 13;
-        for i in 0..n {
-            let t = i as f32 / (n - 1) as f32;
-            let x = 3350.0 - t * (3350.0 - 880.0);
-            let top = SW_SPAWN_Z - 60.0 - t * (SW_SPAWN_Z - 60.0 - 1090.0);
-            let y = if i % 2 == 0 { 70.0 } else { -70.0 };
+        // Middle bunny hop line: level pillars from the spawn to the island.
+        for (i, (x, y, top)) in sw_mid_pillars().into_iter().enumerate() {
+            let _ = i;
             b.push(block(fx(x), y, 52.0, top - 200.0, top, PILLAR_MID));
         }
 
-        // Side bunny hop paths to the sniper towers.
+        // Side bunny hop paths to the sniper towers, also level.
         for ys in [-1.0f32, 1.0] {
-            let n = 19;
-            for i in 0..n {
-                let t = i as f32 / (n - 1) as f32;
-                let x = 3850.0 - t * (3850.0 - 420.0);
-                let top = SW_SPAWN_Z - 24.0 - t * (SW_SPAWN_Z - 24.0 - 1880.0);
-                let y = ys * (2050.0 + if i % 2 == 0 { 55.0 } else { -55.0 });
+            for (i, (x, y, top)) in sw_side_pillars(ys).into_iter().enumerate() {
                 if i % 3 == 1 {
                     b.push(octa_pillar(fx(x), y, 56.0, 0.0, top, PILLAR_SIDE));
                 } else {
@@ -409,30 +537,34 @@ fn surf_wars() -> Map {
         }
     }
 
-    // Sniper towers.
+    // Sniper towers, level with the spawns.
+    let tz = SW_SPAWN_Z;
     for ys in [-1.0f32, 1.0] {
         let (y0, y1) = (ys * 1850.0, ys * 2350.0);
         let (ylo, yhi) = (y0.min(y1), y0.max(y1));
-        b.push(cuboid(vec3(-300.0, ylo, 0.0), vec3(300.0, yhi, 1850.0), CONCRETE));
+        b.push(cuboid(vec3(-300.0, ylo, 0.0), vec3(300.0, yhi, tz), CONCRETE));
         // parapet toward the lanes
         let (p0, p1) = (ys * 1850.0, ys * 1880.0);
-        b.push(cuboid(vec3(-300.0, p0.min(p1), 1850.0), vec3(-60.0, p0.max(p1), 1896.0), METAL));
-        b.push(cuboid(vec3(60.0, p0.min(p1), 1850.0), vec3(300.0, p0.max(p1), 1896.0), METAL));
-        b.push(block(0.0, ys * 2250.0, 32.0, 1850.0, 1914.0, CRATE));
-        b.push(block(-200.0, ys * 2150.0, 28.0, 1850.0, 1906.0, CRATE));
-        b.push(block(200.0, ys * 2150.0, 28.0, 1850.0, 1906.0, CRATE));
+        b.push(cuboid(vec3(-300.0, p0.min(p1), tz), vec3(-60.0, p0.max(p1), tz + 46.0), METAL));
+        b.push(cuboid(vec3(60.0, p0.min(p1), tz), vec3(300.0, p0.max(p1), tz + 46.0), METAL));
+        b.push(block(0.0, ys * 2250.0, 32.0, tz, tz + 64.0, CRATE));
+        b.push(block(-200.0, ys * 2150.0, 28.0, tz, tz + 56.0, CRATE));
+        b.push(block(200.0, ys * 2150.0, 28.0, tz, tz + 56.0, CRATE));
     }
 
-    // Middle island.
-    b.push(cuboid(vec3(-700.0, -420.0, 936.0), vec3(700.0, 420.0, 1000.0), METAL));
-    b.push(cuboid(vec3(-200.0, -200.0, 0.0), vec3(200.0, 200.0, 936.0), CONCRETE));
-    for (x, y, h) in
-        [(0.0, 0.0, 40.0), (-380.0, 220.0, 32.0), (380.0, -220.0, 32.0), (-380.0, -250.0, 28.0), (380.0, 250.0, 28.0)]
-    {
-        b.push(block(x, y, h, 1000.0, 1000.0 + h * 2.0, CRATE));
+    // Middle island, up at spawn height and reached over the pillars.
+    let iz = SW_SPAWN_Z;
+    b.push(cuboid(vec3(-700.0, -420.0, iz - 64.0), vec3(700.0, 420.0, iz), METAL));
+    b.push(cuboid(vec3(-200.0, -200.0, 0.0), vec3(200.0, 200.0, iz - 64.0), CONCRETE));
+    for (x, y, h) in [(-380.0, 220.0, 32.0), (380.0, -220.0, 32.0), (-380.0, -250.0, 28.0), (380.0, 250.0, 28.0)] {
+        b.push(block(x, y, h, iz, iz + h * 2.0, CRATE));
     }
-    b.push(cuboid(vec3(-24.0, -300.0, 1000.0), vec3(24.0, -120.0, 1060.0), METAL));
-    b.push(cuboid(vec3(-24.0, 120.0, 1000.0), vec3(24.0, 300.0, 1060.0), METAL));
+    b.push(cuboid(vec3(-24.0, -300.0, iz), vec3(24.0, -120.0, iz + 60.0), METAL));
+    b.push(cuboid(vec3(-24.0, 120.0, iz), vec3(24.0, 300.0, iz + 60.0), METAL));
+    // Hard to reach perches off the island: tiny pillars with long gaps.
+    for ys in [-1.0f32, 1.0] {
+        perch_line(&mut b, &[(0.0, ys * 640.0), (0.0, ys * 860.0), (0.0, ys * 1075.0)], (0.0, ys * 1300.0), iz, PERCH);
+    }
 
     boundary(&mut b, vec3(5100.0, 2900.0, 0.0), 3600.0);
 
@@ -452,7 +584,21 @@ fn surf_wars() -> Map {
         Aabb::new(vec3(3450.0, -2200.0, SW_SPAWN_Z - 100.0), vec3(4500.0, 2200.0, SW_SPAWN_Z + 400.0)),
     ];
 
-    let teleports = vec![Aabb::new(vec3(-6000.0, -4000.0, -500.0), vec3(6000.0, 4000.0, 450.0))];
+    let pickups = vec![
+        gun(WeaponId::Ak47, 0.0, 1300.0, iz + 24.0),
+        gun(WeaponId::Scout, 0.0, -1300.0, iz + 24.0),
+        gun(WeaponId::Awp, -120.0, 1960.0, tz + 24.0),
+        gun(WeaponId::Awp, 120.0, -1960.0, tz + 24.0),
+        health(-300.0, 0.0, iz + 24.0),
+        health(300.0, 0.0, iz + 24.0),
+        health(150.0, 2250.0, tz + 24.0),
+        health(-150.0, -2250.0, tz + 24.0),
+        // floating over the lane faces in the valley: grab them while surfing
+        health(0.0, 913.0, 1060.0),
+        health(0.0, -913.0, 1060.0),
+        health(0.0, 1287.0, 1060.0),
+        health(0.0, -1287.0, 1060.0),
+    ];
 
     // Bot routes (T side, mirrored for CT).
     let mut routes: Vec<Route> = Vec::new();
@@ -488,16 +634,11 @@ fn surf_wars() -> Map {
     // Middle pillars to the island.
     {
         let mut pts = vec![wp(-3620.0, 0.0, SW_SPAWN_Z, WpMode::Walk)];
-        let n = 13;
-        for i in 0..n {
-            let t = i as f32 / (n - 1) as f32;
-            let x = -(3350.0 - t * (3350.0 - 880.0));
-            let top = SW_SPAWN_Z - 60.0 - t * (SW_SPAWN_Z - 60.0 - 1090.0);
-            let y = if i % 2 == 0 { 70.0 } else { -70.0 };
-            pts.push(wp(x, y, top, WpMode::Hop));
+        for (x, y, top) in sw_mid_pillars() {
+            pts.push(wp(-x, y, top, WpMode::Hop));
         }
-        pts.push(wp(-640.0, 0.0, 1000.0, WpMode::Hop));
-        pts.push(wp(-300.0, 0.0, 1000.0, WpMode::Hold));
+        pts.push(wp(-640.0, 0.0, iz, WpMode::Hop));
+        pts.push(wp(-300.0, 0.0, iz, WpMode::Hold));
         routes.push(Route { team: Team::T, kind: RouteKind::Bhop, name: "mid pillars".into(), points: pts });
     }
     // Side paths to the towers.
@@ -506,16 +647,11 @@ fn surf_wars() -> Map {
             wp(-4200.0, ys * 1100.0, SW_SPAWN_Z, WpMode::Walk),
             wp(-4150.0, ys * 2020.0, SW_SPAWN_Z, WpMode::Walk),
         ];
-        let n = 19;
-        for i in 0..n {
-            let t = i as f32 / (n - 1) as f32;
-            let x = -(3850.0 - t * (3850.0 - 420.0));
-            let top = SW_SPAWN_Z - 24.0 - t * (SW_SPAWN_Z - 24.0 - 1880.0);
-            let y = ys * (2050.0 + if i % 2 == 0 { 55.0 } else { -55.0 });
-            pts.push(wp(x, y, top, WpMode::Hop));
+        for (x, y, top) in sw_side_pillars(ys) {
+            pts.push(wp(-x, y, top, WpMode::Hop));
         }
-        pts.push(wp(-200.0, ys * 2100.0, 1850.0, WpMode::Hop));
-        pts.push(wp(-120.0, ys * 1960.0, 1850.0, WpMode::Hold));
+        pts.push(wp(-200.0, ys * 2100.0, tz, WpMode::Hop));
+        pts.push(wp(-120.0, ys * 1960.0, tz, WpMode::Hold));
         routes.push(Route {
             team: Team::T,
             kind: RouteKind::Sniper,
@@ -527,11 +663,12 @@ fn surf_wars() -> Map {
     routes.extend(mirrored);
 
     Map {
-        name: "surf_wars",
+        name: "surf_wars".into(),
         world: CollisionWorld::new(b),
         spawns,
-        teleports,
+        kill_z: 450.0,
         buyzones,
+        pickups,
         routes,
         sky_top: [0.20, 0.38, 0.72],
         sky_horizon: [0.78, 0.86, 0.95],
@@ -561,6 +698,19 @@ pub fn sc_main_ridge(x: f32) -> f32 {
     } else {
         1500.0 + 600.0 * (ax - 900.0) / 2700.0
     }
+}
+
+/// Canyon pillar line (CT side, positive x).
+fn sc_pillars(ys: f32) -> Vec<(f32, f32, f32)> {
+    let n = 21;
+    (0..n)
+        .map(|i| {
+            let t = i as f32 / (n - 1) as f32;
+            let x = 4300.0 - t * (4300.0 - 700.0);
+            let y = ys * (880.0 + if i % 2 == 0 { 55.0 } else { -55.0 });
+            (x, y, SC_SPAWN_Z)
+        })
+        .collect()
 }
 
 fn surf_canyon() -> Map {
@@ -610,14 +760,9 @@ fn surf_canyon() -> Map {
             b.push(block(fx(x), y, 32.0, SC_SPAWN_Z, SC_SPAWN_Z + 64.0, CRATE));
         }
 
-        // Pillar field between the middle lane and the outer lanes.
+        // Level pillar lines between the middle lane and the outer lanes.
         for ys in [-1.0f32, 1.0] {
-            let n = 16;
-            for i in 0..n {
-                let t = i as f32 / (n - 1) as f32;
-                let x = 4300.0 - t * (4300.0 - 700.0);
-                let top = SC_SPAWN_Z - 40.0 - t * (SC_SPAWN_Z - 40.0 - 1650.0);
-                let y = ys * (880.0 + if i % 2 == 0 { 60.0 } else { -60.0 });
+            for (i, (x, y, top)) in sc_pillars(ys).into_iter().enumerate() {
                 if i % 2 == 0 {
                     b.push(octa_pillar(fx(x), y, 56.0, top - 260.0, top, PILLAR_SIDE));
                 } else {
@@ -626,13 +771,16 @@ fn surf_canyon() -> Map {
             }
         }
     }
-    // Middle platforms at the end of the pillar lines.
+    // Middle platforms at the end of the pillar lines, level with spawn.
+    let pz = SC_SPAWN_Z;
     for ys in [-1.0f32, 1.0] {
         let (y0, y1) = (ys * 700.0, ys * 1100.0);
-        b.push(cuboid(vec3(-560.0, y0.min(y1), 1560.0), vec3(560.0, y0.max(y1), 1600.0), METAL));
-        b.push(block(0.0, ys * 900.0, 36.0, 1600.0, 1672.0, CRATE));
-        b.push(block(-300.0, ys * 830.0, 28.0, 1600.0, 1656.0, CRATE));
-        b.push(block(300.0, ys * 970.0, 28.0, 1600.0, 1656.0, CRATE));
+        b.push(cuboid(vec3(-560.0, y0.min(y1), pz - 40.0), vec3(560.0, y0.max(y1), pz), METAL));
+        b.push(block(0.0, ys * 900.0, 36.0, pz, pz + 72.0, CRATE));
+        b.push(block(-300.0, ys * 830.0, 28.0, pz, pz + 56.0, CRATE));
+        b.push(block(300.0, ys * 970.0, 28.0, pz, pz + 56.0, CRATE));
+        // tiny pillars from the platform toward the AWP perch in the middle
+        perch_line(&mut b, &[(0.0, ys * 520.0), (0.0, ys * 330.0)], (0.0, 0.0), pz, PERCH);
     }
 
     boundary(&mut b, vec3(5700.0, 3300.0, 0.0), 3800.0);
@@ -650,7 +798,17 @@ fn surf_canyon() -> Map {
         Aabb::new(vec3(-5500.0, -2400.0, SC_SPAWN_Z - 100.0), vec3(-4450.0, 2400.0, SC_SPAWN_Z + 400.0)),
         Aabb::new(vec3(4450.0, -2400.0, SC_SPAWN_Z - 100.0), vec3(5500.0, 2400.0, SC_SPAWN_Z + 400.0)),
     ];
-    let teleports = vec![Aabb::new(vec3(-7000.0, -5000.0, -500.0), vec3(7000.0, 5000.0, 450.0))];
+    let pickups = vec![
+        gun(WeaponId::Awp, 0.0, 0.0, pz + 24.0),
+        gun(WeaponId::Ak47, -420.0, 1020.0, pz + 24.0),
+        gun(WeaponId::Ak47, 420.0, -1020.0, pz + 24.0),
+        health(400.0, 780.0, pz + 24.0),
+        health(-400.0, -780.0, pz + 24.0),
+        health(0.0, 200.0, 1236.0),
+        health(0.0, -200.0, 1236.0),
+        health(0.0, 1550.0, 1086.0),
+        health(0.0, -1550.0, 1086.0),
+    ];
 
     let mut routes: Vec<Route> = Vec::new();
     // Lanes: centre lane faces and outer lanes.
@@ -689,16 +847,11 @@ fn surf_canyon() -> Map {
     for ys in [-1.0f32, 1.0] {
         let mut pts =
             vec![wp(-4800.0, ys * 900.0, SC_SPAWN_Z, WpMode::Walk), wp(-4560.0, ys * 900.0, SC_SPAWN_Z, WpMode::Walk)];
-        let n = 16;
-        for i in 0..n {
-            let t = i as f32 / (n - 1) as f32;
-            let x = -(4300.0 - t * (4300.0 - 700.0));
-            let top = SC_SPAWN_Z - 40.0 - t * (SC_SPAWN_Z - 40.0 - 1650.0);
-            let y = ys * (880.0 + if i % 2 == 0 { 60.0 } else { -60.0 });
-            pts.push(wp(x, y, top, WpMode::Hop));
+        for (x, y, top) in sc_pillars(ys) {
+            pts.push(wp(-x, y, top, WpMode::Hop));
         }
-        pts.push(wp(-450.0, ys * 900.0, 1600.0, WpMode::Hop));
-        pts.push(wp(-150.0, ys * 800.0, 1600.0, WpMode::Hold));
+        pts.push(wp(-450.0, ys * 900.0, pz, WpMode::Hop));
+        pts.push(wp(-150.0, ys * 800.0, pz, WpMode::Hold));
         routes.push(Route {
             team: Team::T,
             kind: if ys > 0.0 { RouteKind::Sniper } else { RouteKind::Bhop },
@@ -710,11 +863,12 @@ fn surf_canyon() -> Map {
     routes.extend(mirrored);
 
     Map {
-        name: "surf_canyon",
+        name: "surf_canyon".into(),
         world: CollisionWorld::new(b),
         spawns,
-        teleports,
+        kill_z: 450.0,
         buyzones,
+        pickups,
         routes,
         sky_top: [0.55, 0.30, 0.35],
         sky_horizon: [0.98, 0.72, 0.50],
@@ -722,4 +876,251 @@ fn surf_canyon() -> Map {
         fog_start: 2500.0,
         fog_end: 13000.0,
     }
+}
+
+// ---------------------------------------------------------------------------
+// surf_hairpin
+//
+// A big map made of turning ramps. Each team starts on a high platform,
+// drops onto a ramp that bends 90 degrees into a long straight, then a 180
+// degree hairpin brings it back down the middle of the map, where it meets
+// the other team coming the other way. Every turn goes left, so you stay on
+// the same face of the ramp the whole run. The CT half is the T half rotated
+// 180 degrees around the map centre. Flat pillar lines lead from both spawns
+// to a sky fort in the middle holding the AWP; the AKs sit on perches in the
+// middle of the hairpins where only a well timed jump off the ramp gets you.
+
+const HP_SPAWN_Z: f32 = 4300.0;
+const HP_HW: f32 = 512.0;
+const HP_H: f32 = 768.0;
+
+/// A turning ramp: the triangular ramp profile swept around `center` from
+/// angle `a0` to `a1` (degrees, counter clockwise), ridge from `z0` to `z1`.
+#[allow(clippy::too_many_arguments)]
+pub fn turn_ramp(
+    b: &mut Vec<Brush>,
+    center: Vec3,
+    radius: f32,
+    a0: f32,
+    a1: f32,
+    z0: f32,
+    z1: f32,
+    hw: f32,
+    h: f32,
+    segs: usize,
+    mat: Mat,
+) {
+    for i in 0..segs {
+        let t0 = i as f32 / segs as f32;
+        let t1 = (i + 1) as f32 / segs as f32;
+        let mut pts = Vec::new();
+        for t in [t0, t1] {
+            let a = (a0 + (a1 - a0) * t).to_radians();
+            let dir = vec3(a.cos(), a.sin(), 0.0);
+            let z = z0 + (z1 - z0) * t;
+            let c = vec3(center.x, center.y, 0.0);
+            pts.push(c + dir * radius + vec3(0.0, 0.0, z));
+            pts.push(c + dir * (radius - hw) + vec3(0.0, 0.0, z - h));
+            pts.push(c + dir * (radius + hw) + vec3(0.0, 0.0, z - h));
+        }
+        b.push(Brush::hull(&pts, mat));
+    }
+}
+
+/// Points on the inner face of a turn, `depth` below the ridge.
+#[allow(clippy::too_many_arguments)]
+fn turn_route(
+    pts: &mut Vec<Waypoint>,
+    center: Vec3,
+    radius: f32,
+    a0: f32,
+    a1: f32,
+    z0: f32,
+    z1: f32,
+    depth: f32,
+    step: f32,
+) {
+    let n = ((a1 - a0).abs() / step).ceil().max(1.0) as usize;
+    let r = radius - depth * HP_HW / HP_H;
+    for i in 1..=n {
+        let t = i as f32 / n as f32;
+        let a = (a0 + (a1 - a0) * t).to_radians();
+        let z = z0 + (z1 - z0) * t - depth;
+        pts.push(wp(center.x + a.cos() * r, center.y + a.sin() * r, z, WpMode::Surf));
+    }
+}
+
+fn surf_hairpin() -> Map {
+    let mut b: Vec<Brush> = Vec::new();
+    b.push(cuboid(vec3(-9800.0, -4200.0, -64.0), vec3(9800.0, 4200.0, 0.0), FLOOR));
+    b.push(cuboid(vec3(-9800.0, -4200.0, 0.0), vec3(9800.0, 4200.0, 120.0), WATER));
+
+    // Geometry of the T track; the CT track is the same rotated by 180.
+    // leg0: south along x=-8500 from y=200 to -1500
+    // turn A: centre (-7000,-1500) r 1500, 180 -> 270 degrees
+    // leg1: east along y=-3000 from x=-7000 to 4400
+    // turn B (hairpin): centre (4400,-2050) r 950, -90 -> 90 degrees
+    // leg2: west along y=-1100 from x=4400 to -5500
+    let z_leg0 = (4000.0, 3850.0);
+    let z_a = (3850.0, 3600.0);
+    let z_leg1 = (3600.0, 3100.0);
+    let z_b = (3100.0, 2950.0);
+    let z_leg2 = (2950.0, 2500.0);
+    let turn_a = vec3(-7000.0, -1500.0, 0.0);
+    let turn_b = vec3(4400.0, -2050.0, 0.0);
+
+    for s in [1.0f32, -1.0] {
+        let (team_mat, trim, m0, m1, m2) = if s > 0.0 {
+            (SPAWN_T, TRIM_T, RAMP_B, RAMP_E, RAMP_D)
+        } else {
+            (SPAWN_CT, TRIM_CT, RAMP_A, RAMP_C, RAMP_D)
+        };
+        let r = |p: Vec3| vec3(p.x * s, p.y * s, p.z);
+        let mut local: Vec<Brush> = Vec::new();
+        local.push(ramp_y(-1500.0, 200.0, -8500.0, z_leg0.1, z_leg0.0, HP_HW, HP_H, m0));
+        turn_ramp(&mut local, turn_a, 1500.0, 180.0, 270.0, z_a.0, z_a.1, HP_HW, HP_H, 18, m0);
+        // leg1 split so the slope is gentle at first
+        local.push(ramp_x(-7000.0, -1300.0, -3000.0, z_leg1.0, 3350.0, HP_HW, HP_H, m1));
+        local.push(ramp_x(-1300.0, 4400.0, -3000.0, 3350.0, z_leg1.1, HP_HW, HP_H, m1));
+        turn_ramp(&mut local, turn_b, 950.0, -90.0, 90.0, z_b.0, z_b.1, HP_HW, HP_H, 30, m1);
+        local.push(ramp_x(-5500.0, 4400.0, -1100.0, z_leg2.1, z_leg2.0, HP_HW, HP_H, m2));
+
+        // Spawn platform north of leg0, with its floor tinted over the ramp.
+        let sz = HP_SPAWN_Z;
+        local.push(cuboid(vec3(-9300.0, 300.0, sz - 64.0), vec3(-8988.0, 1500.0, sz), team_mat));
+        local.push(cuboid(vec3(-8988.0, 300.0, sz - 64.0), vec3(-8012.0, 1500.0, sz), tint(team_mat, m0)));
+        local.push(cuboid(vec3(-8012.0, 300.0, sz - 64.0), vec3(-7700.0, 1500.0, sz), team_mat));
+        local.push(cuboid(vec3(-9300.0, 1500.0, sz - 64.0), vec3(-7700.0, 1564.0, sz + 300.0), trim));
+        local.push(cuboid(vec3(-8700.0, 1200.0, 0.0), vec3(-8300.0, 1500.0, sz - 64.0), CONCRETE));
+        local.push(block(-9100.0, 1300.0, 32.0, sz, sz + 64.0, CRATE));
+        local.push(block(-7900.0, 1300.0, 32.0, sz, sz + 64.0, CRATE));
+
+        // Level pillar line to the sky fort, with a rest platform halfway.
+        for (i, (x, y, top)) in hp_pillars().into_iter().enumerate() {
+            if i % 3 == 1 {
+                local.push(octa_pillar(x, y, 54.0, top - 200.0, top, PILLAR_SIDE));
+            } else {
+                local.push(block(x, y, 50.0, top - 200.0, top, PILLAR_MID));
+            }
+        }
+        local.push(cuboid(vec3(-4400.0, -200.0, sz - 48.0), vec3(-4000.0, 200.0, sz), METAL));
+
+        // AK perch in the middle of the hairpin.
+        local.push(block(turn_b.x - 150.0, turn_b.y, 40.0, 2500.0, 3080.0, PERCH));
+
+        for br in local {
+            let pts: Vec<Vec3> = br.points.iter().map(|p| r(*p)).collect();
+            b.push(Brush::hull(&pts, br.mat));
+        }
+    }
+
+    // Sky fort in the middle.
+    let fz = HP_SPAWN_Z;
+    b.push(cuboid(vec3(-700.0, -450.0, fz - 64.0), vec3(700.0, 450.0, fz), METAL));
+    b.push(cuboid(vec3(-150.0, -150.0, 0.0), vec3(150.0, 150.0, fz - 64.0), CONCRETE));
+    for (x, y, h) in [(-350.0, 200.0, 32.0), (350.0, -200.0, 32.0), (0.0, 300.0, 28.0), (0.0, -300.0, 28.0)] {
+        b.push(block(x, y, h, fz, fz + h * 2.0, CRATE));
+    }
+
+    boundary(&mut b, vec3(9700.0, 4100.0, 0.0), 5200.0);
+
+    let mut spawns: [Vec<Spawn>; 2] = [Vec::new(), Vec::new()];
+    for (ti, s) in [(0usize, 1.0f32), (1, -1.0)] {
+        for x in [-9100.0, -8800.0, -8500.0, -8200.0, -7900.0] {
+            for y in [900.0, 1150.0] {
+                spawns[ti].push(Spawn {
+                    pos: vec3(x * s, y * s, HP_SPAWN_Z + 37.0),
+                    yaw: if s > 0.0 { 270.0 } else { 90.0 },
+                });
+            }
+        }
+    }
+    let buyzones = [
+        Aabb::new(vec3(-9400.0, 250.0, HP_SPAWN_Z - 100.0), vec3(-7600.0, 1600.0, HP_SPAWN_Z + 400.0)),
+        Aabb::new(vec3(7600.0, -1600.0, HP_SPAWN_Z - 100.0), vec3(9400.0, -250.0, HP_SPAWN_Z + 400.0)),
+    ];
+
+    let mut pickups =
+        vec![gun(WeaponId::Awp, 0.0, 0.0, fz + 24.0), health(-450.0, 0.0, fz + 24.0), health(450.0, 0.0, fz + 24.0)];
+    for s in [1.0f32, -1.0] {
+        pickups.push(gun(WeaponId::Ak47, (turn_b.x - 150.0) * s, turn_b.y * s, 3104.0));
+        pickups.push(health(-4200.0 * s, 0.0, fz + 24.0));
+        // floating in the surf line along the straights
+        pickups.push(health(-1300.0 * s, -2800.0 * s, 3080.0));
+        pickups.push(health(0.0, -1300.0 * s, 2400.0));
+    }
+
+    // Bot routes for T, rotated for CT.
+    let mut routes = Vec::new();
+    let depth = 300.0;
+    let off = depth * HP_HW / HP_H; // horizontal distance of the line from the ridge
+    let lerp = |a: (f32, f32), t: f32| a.0 + (a.1 - a.0) * t;
+    {
+        let mut pts = vec![wp(-8300.0, 900.0, HP_SPAWN_Z, WpMode::Walk), wp(-8300.0, 380.0, HP_SPAWN_Z, WpMode::Drop)];
+        for y in [0.0, -800.0, -1500.0] {
+            let t = (200.0 - y) / 1700.0;
+            pts.push(wp(-8500.0 + off, y, lerp(z_leg0, t) - depth, WpMode::Surf));
+        }
+        turn_route(&mut pts, turn_a, 1500.0, 180.0, 270.0, z_a.0, z_a.1, depth, 15.0);
+        for x in [-5000.0, -2500.0, 0.0, 2500.0, 4400.0] {
+            let z = if x < -1300.0 {
+                z_leg1.0 + (3350.0 - z_leg1.0) * (x + 7000.0) / 5700.0
+            } else {
+                3350.0 + (z_leg1.1 - 3350.0) * (x + 1300.0) / 5700.0
+            };
+            pts.push(wp(x, -3000.0 + off, z - depth, WpMode::Surf));
+        }
+        turn_route(&mut pts, turn_b, 950.0, -90.0, 90.0, z_b.0, z_b.1, depth, 15.0);
+        for x in [3000.0, 1000.0, -1000.0, -3000.0, -5000.0, -6000.0] {
+            let t = (4400.0 - x) / 9900.0;
+            pts.push(wp(x, -1100.0 - off, lerp(z_leg2, t.min(1.0)) - depth, WpMode::Surf));
+        }
+        routes.push(Route { team: Team::T, kind: RouteKind::Surf, name: "hairpin".into(), points: pts });
+    }
+    {
+        let mut pts = vec![wp(-7850.0, 800.0, HP_SPAWN_Z, WpMode::Walk)];
+        for (x, y, top) in hp_pillars() {
+            pts.push(wp(x, y, top, WpMode::Hop));
+        }
+        pts.push(wp(-640.0, 0.0, fz, WpMode::Hop));
+        pts.push(wp(-250.0, 80.0, fz, WpMode::Hold));
+        routes.push(Route { team: Team::T, kind: RouteKind::Sniper, name: "sky fort".into(), points: pts });
+    }
+    let rotated: Vec<Route> = routes.iter().map(rotate_route).collect();
+    routes.extend(rotated);
+
+    Map {
+        name: "surf_hairpin".into(),
+        world: CollisionWorld::new(b),
+        spawns,
+        kill_z: 450.0,
+        buyzones,
+        pickups,
+        routes,
+        sky_top: [0.12, 0.22, 0.45],
+        sky_horizon: [0.62, 0.72, 0.88],
+        fog_color: [0.55, 0.64, 0.80],
+        fog_start: 4000.0,
+        fog_end: 20000.0,
+    }
+}
+
+/// T side pillar line from the spawn to the sky fort: (x, y, top).
+fn hp_pillars() -> Vec<(f32, f32, f32)> {
+    let mut v = Vec::new();
+    // spawn edge (-7700, 800) east to the rest platform at x=-4400..-4000,
+    // then on to the fort edge at x=-700
+    let a: Vec<f32> = (0..18).map(|i| -7560.0 + i as f32 * 178.0).collect();
+    let bb: Vec<f32> = (0..18).map(|i| -3860.0 + i as f32 * 176.0).collect();
+    for (i, x) in a.iter().enumerate() {
+        let t = i as f32 / 17.0;
+        let y = 800.0 * (1.0 - t) + if i % 2 == 0 { 50.0 } else { -50.0 };
+        v.push((*x, y, HP_SPAWN_Z));
+    }
+    v.push((-4200.0, 0.0, HP_SPAWN_Z));
+    for (i, x) in bb.iter().enumerate() {
+        let y = if i % 2 == 0 { 50.0 } else { -50.0 };
+        v.push((*x, y, HP_SPAWN_Z));
+    }
+    v
 }

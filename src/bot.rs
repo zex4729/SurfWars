@@ -10,7 +10,7 @@ use crate::game::{Game, Phase, TICK, TICK_MSEC};
 use crate::map::{RouteKind, WpMode};
 use crate::pmove::*;
 use crate::util::{angle_norm, horizontal, vec_to_angles, Rng};
-use crate::weapons::{Slot, WeaponId};
+use crate::weapons::{Attachments, Slot, WeaponId, ROCKET_SPEED};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Difficulty {
@@ -98,8 +98,10 @@ fn skill(d: Difficulty) -> Skill {
 
 #[derive(Clone, Copy, Debug)]
 pub enum BotAction {
-    Buy(WeaponId),
+    Buy(WeaponId, Attachments),
     Switch(Slot),
+    /// Stuck for too long: die and come back (like a `kill` command).
+    Suicide,
 }
 
 pub struct BotBrain {
@@ -130,6 +132,11 @@ pub struct BotBrain {
     alt: bool,
     exit_dir: Vec3,
     sidestep_until: f64,
+    /// Where we were when we last made real progress (stuck detection).
+    anchor_pos: Vec3,
+    anchor_time: f64,
+    /// Destination for maps without bot routes.
+    roam_target: Option<Vec3>,
     /// Testing hook: always pick this route.
     pub force_route: Option<usize>,
 }
@@ -166,12 +173,16 @@ impl BotBrain {
             alt: false,
             exit_dir: Vec3::X,
             sidestep_until: 0.0,
+            anchor_pos: Vec3::ZERO,
+            anchor_time: f64::NAN,
+            roam_target: None,
             force_route: None,
         }
     }
 
     pub fn on_spawn(&mut self) {
         self.need_plan = true;
+        self.anchor_time = f64::NAN;
         self.target = None;
         self.hurt_by = None;
         if self.rng.chance(0.3) {
@@ -181,6 +192,7 @@ impl BotBrain {
 
     pub fn on_teleport(&mut self) {
         self.need_plan = true;
+        self.anchor_time = f64::NAN;
     }
 
     pub fn on_hurt(&mut self, attacker: usize) {
@@ -189,24 +201,20 @@ impl BotBrain {
     }
 }
 
+/// Bots buy from the same short list as players; the good guns come from
+/// map pickups.
 fn pick_weapon(rng: &mut Rng) -> WeaponId {
-    let r = rng.f32();
-    if r < 0.30 {
-        WeaponId::Ak47
-    } else if r < 0.48 {
+    if rng.chance(0.6) {
         WeaponId::Mp5
-    } else if r < 0.62 {
-        WeaponId::M3
-    } else if r < 0.80 {
-        WeaponId::Scout
     } else {
-        WeaponId::Awp
+        WeaponId::M3
     }
 }
 
 fn plan_route(g: &Game, i: usize, b: &mut BotBrain) {
     let p = &g.players[i];
-    let sniper = matches!(b.pref, WeaponId::Awp | WeaponId::Scout);
+    // Sniper routes lead to the map's AWP, so some bots go fetch it.
+    let sniper = b.rng.chance(0.35);
     let mut total = 0.0;
     let mut cands: Vec<(usize, f32)> = Vec::new();
     for (ri, r) in g.map.routes.iter().enumerate() {
@@ -250,9 +258,14 @@ fn plan_route(g: &Game, i: usize, b: &mut BotBrain) {
     b.progress_time = g.time;
 }
 
-/// Solves `z0 + vz t - g/2 t^2 = z1` for the later root.
+thread_local! {
+    static GRAVITY: std::cell::Cell<f32> = const { std::cell::Cell::new(800.0) };
+}
+
+/// Solves `z0 + vz t - g/2 t^2 = z1` for the later root, with the server
+/// gravity (which can be changed in the menu).
 fn time_to_height(z0: f32, vz: f32, z1: f32) -> Option<f32> {
-    let a = 400.0;
+    let a = GRAVITY.with(|g| g.get()) * 0.5;
     let disc = vz * vz - 4.0 * a * (z1 - z0);
     if disc < 0.0 {
         return None;
@@ -304,6 +317,23 @@ pub fn think(g: &Game, i: usize, b: &mut BotBrain) -> UserCmd {
     if b.hurt_at.is_nan() {
         b.hurt_at = now;
     }
+    GRAVITY.with(|gr| gr.set(g.vars.gravity.max(1.0)));
+
+    // Stuck for too long (sliding around on some low ramp, wedged in a
+    // corner...): kill ourselves and respawn instead of wasting the round.
+    if g.phase == Phase::Live {
+        let holding = b
+            .route
+            .and_then(|r| g.map.routes[r].points.get(b.wp))
+            .is_some_and(|w| w.mode == WpMode::Hold && now < b.hold_until);
+        if b.anchor_time.is_nan() || holding || p.pm.origin.distance(b.anchor_pos) > 350.0 {
+            b.anchor_pos = p.pm.origin;
+            b.anchor_time = now;
+        } else if now - b.anchor_time > 7.0 {
+            b.anchor_time = f64::NAN;
+            b.actions.push(BotAction::Suicide);
+        }
+    }
     b.alt = !b.alt;
     let sk = skill(b.difficulty);
     let vel = p.pm.velocity;
@@ -312,7 +342,9 @@ pub fn think(g: &Game, i: usize, b: &mut BotBrain) -> UserCmd {
     // Buying and route planning.
     if b.need_plan {
         if p.primary.is_none() && g.in_buyzone(i) {
-            b.actions.push(BotAction::Buy(b.pref));
+            // Random attachments; the bot's aim logic reads their effects.
+            let att = Attachments::random(&mut b.rng);
+            b.actions.push(BotAction::Buy(b.pref, att));
         }
         b.aim = p.angles;
         plan_route(g, i, b);
@@ -397,7 +429,12 @@ pub fn think(g: &Game, i: usize, b: &mut BotBrain) -> UserCmd {
         } else {
             e.pm.origin + vec3(0.0, 0.0, if e.pm.ducking { 0.0 } else { 10.0 })
         };
-        let aim_pt = if target_visible { base + (e.pm.velocity - vel) * (0.05 * sk.lead) } else { b.target_pos };
+        let mut aim_pt = if target_visible { base + (e.pm.velocity - vel) * (0.05 * sk.lead) } else { b.target_pos };
+        if p.active_id() == WeaponId::Rocket && target_visible {
+            // projectile: lead by the flight time and aim at the feet
+            let d = (e.pm.origin - eye).length();
+            aim_pt = e.pm.origin + e.pm.velocity * (d / ROCKET_SPEED) * sk.lead.max(0.3) - vec3(0.0, 0.0, 30.0);
+        }
         let (pitch, yaw) = vec_to_angles(aim_pt - eye);
         desired = vec3(pitch, yaw, 0.0) - p.pm.punchangle * sk.recoil_comp + b.aim_error;
     } else if look_dir.length_squared() > 0.01 {
@@ -475,6 +512,17 @@ fn weapons(g: &Game, i: usize, b: &mut BotBrain, cmd: &mut UserCmd, visible: boo
     let err = fwd.dot(to).clamp(-1.0, 1.0).acos().to_degrees();
     let size = (16.0 / dist.max(1.0)).atan().to_degrees();
 
+    // What the attachments do to this gun.
+    let mods = p.weapon().map(|w| w.mods()).unwrap_or_default();
+    let airborne = !(p.pm.onground || (g.settings.ramp_accuracy && p.pm.is_surfing()));
+    let speed = horizontal(p.pm.velocity).length();
+    let mut accuracy = mods.spread;
+    if airborne {
+        accuracy *= mods.air_spread;
+    } else if speed > 140.0 {
+        accuracy *= mods.move_spread;
+    }
+
     // Scoping.
     if !def.zoom_fov.is_empty() && p.pm.onground && dist > 450.0 && p.zoom == 0 && p.resume_zoom.is_none() {
         if p.prev_buttons & IN_ATTACK2 == 0 && now >= p.next_attack {
@@ -482,9 +530,33 @@ fn weapons(g: &Game, i: usize, b: &mut BotBrain, cmd: &mut UserCmd, visible: boo
         }
         return;
     }
+    // Aim down a zoom sight at range when it pays off (the ACOG slows us
+    // down, so only use it when not surfing hard).
+    if let Some(w) = p.weapon() {
+        let ads_ok = mods.zoom.is_some() && def.zoom_fov.is_empty() && (mods.ads_speed == 0.0 || speed < 400.0);
+        if ads_ok && dist > 650.0 && p.zoom == 0 && w.zoom_levels() > 0 && p.prev_buttons & IN_ATTACK2 == 0 {
+            cmd.buttons |= IN_ATTACK2;
+        }
+        if w.is_ads(p.zoom) {
+            accuracy *= mods.ads_spread;
+        }
+    }
+
+    // Rockets: lead the target and aim at its feet, never point blank.
+    if id == WeaponId::Rocket {
+        if !(200.0..2500.0).contains(&dist) {
+            return;
+        }
+        let lead = e.pm.origin + e.pm.velocity * (dist / ROCKET_SPEED) - vec3(0.0, 0.0, 30.0);
+        let to_lead = (lead - eye).normalize_or_zero();
+        if fwd.dot(to_lead).clamp(-1.0, 1.0).acos().to_degrees() < 6.0 {
+            cmd.buttons |= IN_ATTACK;
+        }
+        return;
+    }
 
     let tolerance = match id {
-        WeaponId::Awp | WeaponId::Scout => size * 0.9,
+        WeaponId::Awp | WeaponId::Scout | WeaponId::Laser => size * 0.9,
         WeaponId::M3 => size * 3.0 + 2.0,
         WeaponId::Knife => 25.0,
         _ => size * 1.6 + 0.6,
@@ -496,33 +568,33 @@ fn weapons(g: &Game, i: usize, b: &mut BotBrain, cmd: &mut UserCmd, visible: boo
     let max_range = match id {
         WeaponId::M3 => 900.0,
         WeaponId::Usp => {
-            if p.pm.onground {
-                1500.0
-            } else {
+            if airborne {
                 900.0
+            } else {
+                1500.0
             }
         }
         WeaponId::Mp5 => {
-            if p.pm.onground {
-                1800.0
-            } else {
+            if airborne {
                 1100.0
+            } else {
+                2000.0
             }
         }
         WeaponId::Ak47 => {
-            if p.pm.onground {
-                3000.0
-            } else {
+            if airborne {
                 1500.0
+            } else {
+                3000.0
             }
         }
         _ => 8000.0,
     };
-    if dist > max_range {
+    // Better accuracy from attachments lets the bot take longer shots.
+    if dist > max_range / accuracy.max(0.3) {
         return;
     }
     // Snipers only shoot when they are (nearly) standing still.
-    let speed = horizontal(p.pm.velocity).length();
     if (id == WeaponId::Awp && (speed > 140.0 || !p.pm.onground))
         || (id == WeaponId::Scout && speed > 170.0 && dist > 500.0)
     {
@@ -544,15 +616,17 @@ fn weapons(g: &Game, i: usize, b: &mut BotBrain, cmd: &mut UserCmd, visible: boo
             cmd.buttons |= IN_ATTACK;
             if now >= p.next_attack && p.weapon().is_some_and(|w| w.clip > 0) {
                 b.burst += 1;
-                let max_burst = if dist > 1800.0 {
-                    2
+                let base: f32 = if dist > 1800.0 {
+                    2.0
                 } else if dist > 900.0 {
-                    4
+                    4.0
                 } else if dist > 400.0 {
-                    7
+                    7.0
                 } else {
-                    30
+                    30.0
                 };
+                // Less recoil (grips, heavy stock, compensator) = longer bursts.
+                let max_burst = (base / mods.recoil).round().max(1.0) as u32;
                 if b.burst >= max_burst {
                     b.burst = 0;
                     b.burst_pause_until = now + if dist > 1200.0 { 0.45 } else { 0.3 };
@@ -580,7 +654,7 @@ fn movement(g: &Game, i: usize, b: &mut BotBrain, fighting: bool) -> (Vec3, bool
     }
 
     let Some(ri) = b.route else {
-        return (Vec3::ZERO, false, false, Vec3::ZERO);
+        return roam(g, i, b);
     };
     let route = &g.map.routes[ri];
     if b.wp >= route.points.len() {
@@ -653,7 +727,7 @@ fn movement(g: &Game, i: usize, b: &mut BotBrain, fighting: bool) -> (Vec3, bool
             }
             (dir * 250.0, jump, duck, dir)
         }
-        WpMode::Hop => hop(g, i, b, w.pos, jump),
+        WpMode::Hop => hop(g, i, b, w.pos, route.points.get(b.wp + 1).map(|n| n.pos), jump),
         WpMode::Surf => surf(g, i, b, route, jump),
         WpMode::Hold => {
             if b.hold_until == 0.0 {
@@ -694,7 +768,14 @@ fn movement(g: &Game, i: usize, b: &mut BotBrain, fighting: bool) -> (Vec3, bool
     }
 }
 
-fn hop(g: &Game, i: usize, b: &mut BotBrain, target: Vec3, mut jump: bool) -> (Vec3, bool, bool, Vec3) {
+fn hop(
+    g: &Game,
+    i: usize,
+    b: &mut BotBrain,
+    target: Vec3,
+    next: Option<Vec3>,
+    mut jump: bool,
+) -> (Vec3, bool, bool, Vec3) {
     let p = &g.players[i];
     let pos = p.pm.origin;
     let vel = p.pm.velocity;
@@ -704,21 +785,29 @@ fn hop(g: &Game, i: usize, b: &mut BotBrain, target: Vec3, mut jump: bool) -> (V
     let dir = if d > 1.0 { to / d } else { horizontal(vel).normalize_or_zero() };
 
     if p.pm.onground {
-        if d < 58.0 && (pos.z - stand_z).abs() < 24.0 {
-            // Landed on the target: move on.
+        if d < 60.0 && (pos.z - stand_z).abs() < 24.0 {
+            // Landed on the target: move on and jump again right away, on
+            // the landing tick, so friction and the landing slowdown never
+            // get a chance to eat our speed (a proper bunny hop).
             b.wp += 1;
-            return (dir * 250.0, jump, false, dir);
+            let nd = next.map(|n| horizontal(n - pos).normalize_or(dir)).unwrap_or(dir);
+            return (nd * 250.0, next.is_some(), false, nd);
         }
-        let speed = horizontal(vel).length();
+        let speed = horizontal(vel).length().max(150.0);
         let ratio = if p.pm.fuser2 > 0.0 { (100.0 - p.pm.fuser2 * 0.001 * 19.0) * 0.01 } else { 1.0 };
         let v0 = 268.33 * ratio;
         let t = time_to_height(pos.z, v0, stand_z).unwrap_or(0.0);
-        let reach_max = (speed.max(200.0) + 90.0 * t) * t;
-        if t > 0.0 && d - 45.0 <= reach_max {
+        // Jump so that we come down a little before the centre (air strafing
+        // can still add a bit of distance, but can hardly take any away).
+        let reach = (speed + 40.0 * t) * t;
+        if t > 0.0 && d <= reach + 25.0 {
             jump = true;
         }
-        if (pos.z - stand_z).abs() < 24.0 && d < 58.0 {
-            jump = false;
+        // Also jump if the next step would take us off our current platform.
+        let ahead = pos + dir * (speed * TICK * 3.0 + 18.0);
+        let floor = g.map.world.trace(ahead, ahead - vec3(0.0, 0.0, 60.0), p.pm.mins(), p.pm.maxs());
+        if !floor.hit() {
+            jump = true;
         }
         return (dir * 250.0, jump, false, dir);
     }
@@ -823,4 +912,65 @@ fn surf(g: &Game, i: usize, b: &mut BotBrain, route: &crate::map::Route, jump: b
     let forward = horizontal(vel).dot(travel).max(250.0);
     let desired = travel * forward + side * (lateral / tt).clamp(-700.0, 700.0);
     (air_steer(vel, desired, b.alt), jump, false, travel)
+}
+
+/// Movement on maps without bot routes (editor maps): head for the enemy
+/// spawn or a random pickup, surf any ramp we land on toward it, bunny hop
+/// on flat ground. Bots that get stuck die and respawn.
+fn roam(g: &Game, i: usize, b: &mut BotBrain) -> (Vec3, bool, bool, Vec3) {
+    let p = &g.players[i];
+    let pos = p.pm.origin;
+    let vel = p.pm.velocity;
+    let reached = b.roam_target.is_none_or(|t| horizontal(t - pos).length() < 120.0);
+    if reached || b.rng.chance(0.002) {
+        let enemy = &g.map.spawns[p.team.other().index()];
+        b.roam_target = if !g.map.pickups.is_empty() && b.rng.chance(0.4) {
+            let k = b.rng.range_u32(0, g.map.pickups.len() as u32 - 1) as usize;
+            Some(g.map.pickups[k].pos)
+        } else if !enemy.is_empty() {
+            let k = b.rng.range_u32(0, enemy.len() as u32 - 1) as usize;
+            Some(enemy[k].pos)
+        } else {
+            Some(vec3(b.rng.range(-3000.0, 3000.0), b.rng.range(-3000.0, 3000.0), pos.z))
+        };
+    }
+    let target = b.roam_target.unwrap_or(pos);
+    let to = horizontal(target - pos);
+    let dir = to.normalize_or(Vec3::X);
+    if p.pm.onground {
+        return (dir * 250.0, b.alt, false, dir);
+    }
+    if p.pm.surf_time < 0.2 {
+        // Ride the ramp toward the target: rotate velocity with pushes
+        // perpendicular to it, never away from the ramp.
+        let n = p.pm.surf_normal;
+        let nh_dir = horizontal(n).normalize_or_zero();
+        let vh = horizontal(vel);
+        let speed = vh.length();
+        let a = (Vec3::Z - n * n.z).normalize_or_zero().cross(n).normalize_or_zero();
+        let a_dir = if a.dot(dir) >= 0.0 { a } else { -a };
+        if speed < 60.0 {
+            return (a_dir * 250.0 - nh_dir * 120.0, false, false, a_dir);
+        }
+        let perp = vec3(-vh.y, vh.x, 0.0) / speed;
+        // keep height: turn toward "along the ramp, slightly up"
+        let want = (a_dir + (Vec3::Z - n * n.z).normalize_or_zero() * 0.15).normalize_or_zero();
+        let vn = (vel - n * vel.dot(n)).normalize_or_zero();
+        let mut best = Vec3::ZERO;
+        let mut best_score = 0.01;
+        for c in [perp, -perp] {
+            if c.dot(nh_dir) > 0.05 {
+                continue;
+            }
+            let score = (c - n * c.dot(n)).dot(want);
+            if score > best_score {
+                best_score = score;
+                best = c;
+            }
+        }
+        let err = vn.dot(want).clamp(-1.0, 1.0).acos().to_degrees();
+        return (best * (err * 8.0).clamp(0.0, 250.0), false, false, a_dir);
+    }
+    let desired = dir * horizontal(vel).length().max(250.0);
+    (air_steer(vel, desired, b.alt), false, false, dir)
 }

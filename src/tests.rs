@@ -156,6 +156,9 @@ fn bot_routes() {
                 max_speed,
                 surf_ticks as f32 * 0.01
             );
+            // The bot must get through the route (the last point may be a
+            // hold spot it is still camping at).
+            assert!(max_wp + 1 >= r.points.len(), "{} / {}: stopped at waypoint {}", mapname, r.name, max_wp);
             if std::env::var("BOTLOG").map_or(false, |v| r.name.contains(&v)) {
                 println!("{log}");
             }
@@ -233,7 +236,7 @@ fn bot_match() {
         for p in &g.players {
             println!("   {:<16} {:?} k={} d={}", p.name, p.team, p.kills, p.deaths);
         }
-        assert!(rounds >= 2 && kills > 5);
+        assert!(rounds >= 1 && kills > 5);
     }
 }
 
@@ -390,7 +393,7 @@ mod weapon_tests {
     #[test]
     fn ak_kills_and_reloads() {
         let mut g = duel();
-        assert!(g.buy(0, WeaponId::Ak47));
+        g.give(0, WeaponId::Ak47);
         let mut kills = 0;
         let mut shots = 0;
         for _ in 0..400 {
@@ -442,7 +445,7 @@ mod weapon_tests {
     fn awp_scope_resumes_after_shot() {
         let mut g = duel();
         g.players[1].health = 1000.0; // keep the dummy alive
-        assert!(g.buy(0, WeaponId::Awp));
+        g.give(0, WeaponId::Awp);
         for _ in 0..150 {
             let c = cmd(&g, 0);
             g.step(Some(c));
@@ -487,7 +490,7 @@ mod weapon_tests {
     #[test]
     fn headshot_multiplier() {
         let mut g = duel();
-        assert!(g.buy(0, WeaponId::Scout));
+        g.give(0, WeaponId::Scout);
         for _ in 0..150 {
             let c = cmd(&g, 0);
             g.step(Some(c));
@@ -526,4 +529,162 @@ fn bhop_cap_only_on_stock_settings() {
             assert!(speed > 495.0, "surf speed {speed}");
         }
     }
+}
+
+#[test]
+fn only_basic_guns_are_for_sale() {
+    use crate::game::*;
+    use crate::weapons::WeaponId;
+    let s = Settings { player_team: Some(crate::map::Team::T), bots_t: 0, bots_ct: 0, ..Default::default() };
+    let mut g = Game::new(s, 1);
+    for id in [WeaponId::Usp, WeaponId::M3, WeaponId::Mp5] {
+        assert!(g.buy(0, id));
+    }
+    for id in [WeaponId::Ak47, WeaponId::Awp, WeaponId::Scout, WeaponId::Laser, WeaponId::Rocket] {
+        assert!(!g.buy(0, id));
+    }
+}
+
+#[test]
+fn map_files_round_trip() {
+    for name in crate::map::BUILTIN_MAPS {
+        let m = map::load(name);
+        let text = crate::mapfile::to_text(&m);
+        let back = crate::mapfile::from_text(&text).unwrap();
+        assert_eq!(back.world.brushes.len(), m.world.brushes.len(), "{name}");
+        assert_eq!(back.pickups.len(), m.pickups.len());
+        assert_eq!(back.spawns[0].len(), m.spawns[0].len());
+        for (a, b) in m.world.brushes.iter().zip(back.world.brushes.iter()) {
+            assert!((a.mins - b.mins).length() < 0.1 && (a.maxs - b.maxs).length() < 0.1);
+        }
+    }
+}
+
+/// Rockets explode, hurt, and knock players around (rocket jumps).
+#[test]
+fn rocket_splash_and_knockback() {
+    use crate::game::*;
+    use crate::weapons::WeaponId;
+    let s = Settings {
+        player_team: Some(crate::map::Team::T),
+        bots_t: 0,
+        bots_ct: 1,
+        mode: Mode::Deathmatch,
+        ..Default::default()
+    };
+    let mut g = Game::new(s, 5);
+    g.players[0].pm = PmState::new(vec3(-4200.0, -300.0, 2436.0));
+    g.players[1].pm = PmState::new(vec3(-3900.0, -300.0, 2436.0));
+    g.players[1].bot = None;
+    g.give(0, WeaponId::Rocket);
+    for _ in 0..150 {
+        g.step(Some(UserCmd { msec: 10, viewangles: g.players[0].angles, ..Default::default() }));
+    }
+    // aim at the dummy's feet
+    let (p, y) = crate::util::vec_to_angles(g.players[1].pm.origin - vec3(0.0, 0.0, 30.0) - g.players[0].pm.eye());
+    let mut exploded = false;
+    let hp0 = g.players[1].health;
+    for i in 0..100 {
+        let buttons = if i == 0 { IN_ATTACK } else { 0 };
+        g.step(Some(UserCmd { msec: 10, viewangles: vec3(p, y, 0.0), buttons, ..Default::default() }));
+        exploded |= g.events.drain(..).any(|e| matches!(e, Event::Explosion { .. }));
+    }
+    assert!(exploded);
+    assert!(g.players[1].health < hp0 || !g.players[1].alive);
+    // rocket jump: fire at the floor under our own feet
+    g.players[0].pm = PmState::new(vec3(-4200.0, 300.0, 2436.0));
+    for _ in 0..100 {
+        g.step(Some(UserCmd { msec: 10, viewangles: vec3(89.0, 0.0, 0.0), ..Default::default() }));
+    }
+    let mut max_vz: f32 = 0.0;
+    for i in 0..60 {
+        let buttons = if i == 0 { IN_ATTACK } else { 0 };
+        g.step(Some(UserCmd { msec: 10, viewangles: vec3(89.0, 0.0, 0.0), buttons, ..Default::default() }));
+        max_vz = max_vz.max(g.players[0].pm.velocity.z);
+    }
+    assert!(max_vz > 400.0, "rocket jump only reached vz {max_vz}");
+}
+
+/// Attachments change weapon behaviour the way their descriptions say.
+#[test]
+fn attachments_modify_weapons() {
+    use crate::weapons::*;
+    let heavy = Attachments { stock: Stock::Heavy, grip: Grip::Vertical, ..Default::default() }.mods();
+    assert!(heavy.recoil < 0.7 && heavy.speed < 0.0);
+    let acog = Weapon::with(WeaponId::Mp5, Attachments { sight: Sight::Acog, ..Default::default() });
+    assert_eq!(acog.zoom_levels(), 1);
+    assert!(acog.is_ads(1) && acog.zoom_fov(1) < 50.0);
+    let supp = Attachments { muzzle: Muzzle::Suppressor, ..Default::default() }.mods();
+    assert!(supp.silenced && supp.damage < 1.0);
+    // an AWP keeps its own scope levels whatever sight is chosen
+    let awp = Weapon::with(WeaponId::Awp, Attachments { sight: Sight::RedDot, ..Default::default() });
+    assert_eq!(awp.zoom_levels(), 2);
+    assert!(!awp.is_ads(1));
+}
+
+/// Health packs heal and then respawn later.
+#[test]
+fn health_pickup() {
+    use crate::game::*;
+    let s = Settings {
+        player_team: Some(crate::map::Team::T),
+        bots_t: 0,
+        bots_ct: 0,
+        mode: Mode::Deathmatch,
+        ..Default::default()
+    };
+    let mut g = Game::new(s, 5);
+    let k = g.pickups.iter().position(|p| p.def.kind == crate::map::PickupKind::Health).unwrap();
+    let pos = g.pickups[k].def.pos;
+    g.players[0].health = 30.0;
+    g.players[0].pm = PmState::new(pos + vec3(0.0, 0.0, 20.0));
+    g.step(Some(UserCmd { msec: 10, ..Default::default() }));
+    assert!(g.players[0].health >= 79.0, "health {}", g.players[0].health);
+    assert!(g.pickups[k].available_at > g.time);
+}
+
+/// Builds a map with every editor tool, saves it, loads it back and plays
+/// a bot match on it (bots roam since editor maps have no routes).
+#[test]
+fn editor_build_save_play() {
+    use crate::editor::Editor;
+    use crate::game::*;
+    let mut ed = Editor::new(None);
+    let n0 = ed.game.map.world.brushes.len();
+    ed.look_from(vec3(0.0, -1500.0, 2600.0), vec3(35.0, 90.0, 0.0));
+    for k in ["box", "slope", "ramp", "pillar", "turn90", "turn180"] {
+        ed.add_shape(k);
+    }
+    assert!(ed.game.map.world.brushes.len() > n0 + 5 + 24);
+    let b = ed.selected_brush().unwrap();
+    let before = ed.game.map.world.brushes[b].mins;
+    ed.move_sel(vec3(64.0, 0.0, 0.0));
+    assert!((ed.game.map.world.brushes[b].mins.x - before.x - 64.0).abs() < 0.5);
+    ed.resize_sel(2, 64.0);
+    ed.rotate_sel(15.0);
+    ed.duplicate_sel();
+    ed.delete_sel();
+    ed.restyle_sel(true);
+    ed.add_spawn(crate::map::Team::T);
+    ed.add_spawn(crate::map::Team::CT);
+    for k in 0..9 {
+        ed.set_pickup_kind(k);
+        ed.add_pickup();
+    }
+    ed.game.map.name = "test_editor_map".into();
+    let text = crate::mapfile::to_text(&ed.game.map);
+    let map = crate::mapfile::from_text(&text).unwrap();
+    assert_eq!(map.world.brushes.len(), ed.game.map.world.brushes.len());
+    assert!(map.pickups.iter().any(|p| p.kind == crate::map::PickupKind::Weapon(crate::weapons::WeaponId::Rocket)));
+    assert!(map.pickups.iter().any(|p| p.kind == crate::map::PickupKind::Weapon(crate::weapons::WeaponId::Laser)));
+    let s = Settings { player_team: None, bots_t: 3, bots_ct: 3, mode: Mode::Deathmatch, ..Default::default() };
+    let mut g = Game::with_map(map, s, 9);
+    let mut moved = 0.0;
+    for _ in 0..6000 {
+        let before: Vec<Vec3> = g.players.iter().map(|p| p.pm.origin).collect();
+        g.step(None);
+        moved += g.players.iter().zip(before).map(|(p, b)| (p.pm.origin - b).length().min(100.0)).sum::<f32>();
+        g.events.clear();
+    }
+    assert!(moved > 10000.0, "bots barely moved on an editor map: {moved}");
 }

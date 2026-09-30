@@ -20,6 +20,7 @@ cargo fmt                                  # rustfmt.toml: max_width 120
 
 All tests are in `src/tests.rs`, which is a `#[cfg(test)]` module of the binary:
 - `bot_routes` runs one bot along every route of every map and prints how far it got. Setting `BOTLOG=<route name substring>` dumps that route's trajectory.
+- `bot_routes` asserts that the bot reaches the end of every route, so it doubles as a map regression test.
 - `bot_match`, `idle_human_long_run` and `shot_stats` simulate full matches headlessly. `shot_stats` prints hit rates by weapon and by ground/air, which is useful when tuning balance.
 
 ### Headless screenshots
@@ -33,7 +34,7 @@ xvfb-run -a -s "-screen 0 1280x720x24" env LIBGL_ALWAYS_SOFTWARE=1 \
 
 Options:
 - `--cam`: `spectate`, `third`, `eye`, `overview`, `possess`, `possess3`
-- `--ui`: `buy`, `scores`, `pause`, `scope`
+- `--ui`: `buy`, `scores`, `pause`, `scope`, `attach`, `laser`, `rocket`, `movement`, `editor`
 - also `--menu`, `--map`, `--team t|ct`, `--follow N`, `--look pitch,yaw`, `--after SECONDS`
 
 The possess modes copy a surfing bot's movement state onto the local player. Without a sound device, ALSA prints errors and the audio thread panics; this is harmless.
@@ -49,16 +50,17 @@ The possess modes copy a surfing bot's movement state onto the local player. Wit
 **Movement (`pmove.rs`)** is a faithful port of CS 1.6's `pm_shared.c`. Keep it that way. Only the surf-server values in `MoveVars::surf_server()` differ from stock.
 
 **Collision (`collision.rs`).** Brushes are convex half-space sets. Each brush gets axial and edge bevel planes so that Minkowski expansion by the player AABB stays tight. Two deliberate choices matter for surfing; don't "fix" them back to Quake 3 behaviour:
-- GoldSrc semantics: a plane only blocks a move that actually crosses it. The Q3 epsilon check makes players stick to ramps.
+- GoldSrc semantics: a plane only blocks a move that actually crosses it.
+- `PlayerMove::fly_move` nudges the player back out to `DIST_EPSILON` when a bump makes no progress. Without it, float noise at large coordinates freezes surfers on long ramps (the "ramp bug"). The Q3 epsilon check makes players stick to ramps.
 - The entering plane is chosen by its exact crossing fraction, and the `DIST_EPSILON` backoff is applied afterwards. Choosing by the backed-off fraction turns ramp seams into invisible walls. `ramp_seams_do_not_stop_surfers` guards this.
 
 **Events.** Game logic pushes `game::Event`s: shots, hits, kills, teleports and so on. `main.rs` drains them after each tick and hands them to `render::Renderer::handle_events` (effects) and `audio::Audio::handle_events`. New feedback should go through an event, not through calls from the game into the renderer or audio.
 
-**Maps (`map.rs`)** are functions that return a `Map`: brushes built with `Brush::cuboid` or `Brush::hull(points)`, spawns, teleport and buy zones, fog and sky colours, and bot `Route`s. Routes are written for the T side and mirrored to CT with `mirror_route`, which relies on the maps being symmetric in x. Each waypoint has a mode (`Walk`, `Drop`, `Hop`, `Surf`, `Hold`) that drives the bot controller. A new map needs routes, or bots won't move usefully. Register it in `map_names()` and `load()`.
+**Maps (`map.rs`)** are either built-in functions or text files in `maps/` loaded by `mapfile.rs` (`map::load` handles both). A `Map` holds brushes built with `Brush::cuboid` or `Brush::hull(points)` (each `Brush` keeps its `points`, which is what the editor edits and the file format stores), spawns, a `kill_z` fall height, buy zones, `pickups`, fog and sky colours, and bot `Route`s. `turn_ramp` builds curved ramps from segment prisms. Routes are written for the T side and mirrored to CT with `mirror_route` (symmetric in x) or `rotate_route` (surf_hairpin, symmetric under 180° rotation). Each waypoint has a mode (`Walk`, `Drop`, `Hop`, `Surf`, `Hold`) that drives the bot controller. Built-in maps need routes, or bots fall back to `bot::roam`. Register them in `BUILTIN_MAPS` and `load()`. Editor maps have no routes and always roam.
 
 **Bots (`bot.rs`).** The surf controller rotates velocity with air-accel pushes perpendicular to the horizontal velocity, toward a look-ahead point on the route line. Pushing straight into a tilted ramp brakes. The bhop controller predicts landing time. On the climbing half of a lane, route waypoints deliberately keep the valley height instead of following the ridge up.
 
-**Weapons (`weapons.rs`)** hold CS 1.6 stats plus the spread (`compute_spread`) and recoil (`apply_recoil` / `KickBack`) formulas. `Settings::ramp_accuracy` (default on) is a deliberate deviation from stock CS: a player touching a surf ramp counts as grounded for spread.
+**Weapons (`weapons.rs`)** hold CS 1.6 stats plus the spread (`compute_spread`) and recoil (`apply_recoil` / `KickBack`) formulas. `Attachments::mods()` returns multipliers that `Game::fire` applies on top of them (spread, recoil, damage, range) and that `Player::maxspeed`, reload and deploy use. Weapons with a sight but no scope get an aim-down-sights zoom level (`Weapon::zoom_levels` / `is_ads`). Only `ALL_BUYABLE` can be bought; the rest are map pickups. Bots read `mods()` in `bot::weapons` to scale range and bursts. `Settings::ramp_accuracy` (default on) is a deliberate deviation from stock CS: a player touching a surf ramp counts as grounded for spread.
 
 **Rendering (`render.rs`).**
 - World brushes become static meshes grouped by texture, capped at `MAX_VERTS` per mesh. macroquad meshes use u16 indices, and the draw-call capacities are set in `window_conf`.

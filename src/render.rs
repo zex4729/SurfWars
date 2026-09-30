@@ -378,6 +378,18 @@ struct Tracer {
     t0: f64,
 }
 
+struct Beam {
+    a: Vec3,
+    b: Vec3,
+    t0: f64,
+    color: Vec3,
+}
+
+struct Flash {
+    pos: Vec3,
+    t0: f64,
+}
+
 struct Particle {
     pos: Vec3,
     vel: Vec3,
@@ -408,6 +420,8 @@ pub struct Renderer {
     alpha_mat: Material,
     sky: Mesh,
     tracers: Vec<Tracer>,
+    beams: Vec<Beam>,
+    flashes: Vec<Flash>,
     particles: Vec<Particle>,
     decals: VecDeque<Decal>,
     rings: Vec<Ring>,
@@ -507,6 +521,8 @@ impl Renderer {
             fx_mat,
             alpha_mat,
             tracers: Vec::new(),
+            beams: Vec::new(),
+            flashes: Vec::new(),
             particles: Vec::new(),
             decals: VecDeque::new(),
             rings: Vec::new(),
@@ -521,6 +537,13 @@ impl Renderer {
         r.decal.tex = Some(r.tex.glow.clone());
         r.build_world(game);
         r
+    }
+
+    /// Rebuilds the world meshes and sky after the map changed (editor).
+    pub fn rebuild_world(&mut self, game: &Game) {
+        self.world.clear();
+        self.sky = build_sky(game);
+        self.build_world(game);
     }
 
     fn build_world(&mut self, game: &Game) {
@@ -608,6 +631,49 @@ impl Renderer {
                         self.tracers.push(Tracer { a: *start, b: *end, t0: now });
                     }
                 }
+                Event::Laser { start, end, team } => {
+                    let c = match team {
+                        Team::T => vec3(1.0, 0.25, 0.2),
+                        Team::CT => vec3(0.25, 0.8, 1.0),
+                    };
+                    self.beams.push(Beam { a: *start, b: *end, t0: now, color: c });
+                    for _ in 0..3 {
+                        let v = vec3(self.rng.range(-1.0, 1.0), self.rng.range(-1.0, 1.0), self.rng.range(-1.0, 1.0))
+                            * 120.0;
+                        self.particles.push(Particle {
+                            pos: *end,
+                            vel: v,
+                            t0: now,
+                            life: 0.25,
+                            size: 2.0,
+                            color: c,
+                            gravity: 0.0,
+                        });
+                    }
+                }
+                Event::Explosion { pos } => {
+                    self.flashes.push(Flash { pos: *pos, t0: now });
+                    self.rings.push(Ring { pos: *pos, t0: now, color: vec3(1.0, 0.6, 0.2) });
+                    for _ in 0..40 {
+                        let v = vec3(self.rng.range(-1.0, 1.0), self.rng.range(-1.0, 1.0), self.rng.range(-0.6, 1.0))
+                            .normalize_or_zero()
+                            * self.rng.range(150.0, 650.0);
+                        let hot = self.rng.chance(0.6);
+                        self.particles.push(Particle {
+                            pos: *pos,
+                            vel: v,
+                            t0: now,
+                            life: self.rng.range(0.3, 0.9),
+                            size: if hot { self.rng.range(4.0, 9.0) } else { 2.0 },
+                            color: if hot { vec3(1.0, 0.55, 0.15) } else { vec3(1.0, 0.9, 0.5) },
+                            gravity: if hot { 100.0 } else { 700.0 },
+                        });
+                    }
+                }
+                Event::PickupTaken { pos, health, .. } => {
+                    let c = if *health { vec3(0.3, 1.0, 0.4) } else { vec3(1.0, 0.85, 0.3) };
+                    self.rings.push(Ring { pos: *pos - vec3(0.0, 0.0, 20.0), t0: now, color: c });
+                }
                 Event::Impact { pos, normal } => {
                     self.decals.push_back(Decal { pos: *pos + *normal * 0.6, normal: *normal, t0: now });
                     if self.decals.len() > 150 {
@@ -664,16 +730,8 @@ impl Renderer {
 
     pub fn draw(&mut self, game: &Game, view: &View, alpha: f32, show_viewmodel: bool) {
         self.time = game.time;
-        let (fwd, right, up) = angle_vectors(view.angles);
-        let cam = Camera3D {
-            position: view.pos,
-            target: view.pos + fwd,
-            up,
-            fovy: vfov(view.fov),
-            z_near: 2.0,
-            z_far: 40000.0,
-            ..Default::default()
-        };
+        let (_, right, up) = angle_vectors(view.angles);
+        let cam = camera_for(view);
         clear_background(Color::new(game.map.fog_color[0], game.map.fog_color[1], game.map.fog_color[2], 1.0));
         set_camera(&cam);
 
@@ -720,7 +778,37 @@ impl Renderer {
         }
         for d in &game.dropped {
             let m = Mat4::from_translation(d.pos) * Mat4::from_rotation_z(d.yaw.to_radians());
-            draw_weapon_model(&mut self.solid, d.weapon.id, &m);
+            draw_weapon_model(&mut self.solid, d.weapon.id, d.weapon.att, &m);
+        }
+        for r in &game.rockets {
+            let d = r.vel.normalize_or(Vec3::X);
+            let q = Quat::from_rotation_arc(Vec3::X, d);
+            let m = Mat4::from_rotation_translation(q, r.pos) * Mat4::from_scale(vec3(18.0, 3.2, 3.2));
+            self.solid.cube(&m, vec3(0.35, 0.38, 0.3));
+            let tip = Mat4::from_rotation_translation(q, r.pos + d * 10.0) * Mat4::from_scale(vec3(4.0, 2.2, 2.2));
+            self.solid.cube(&tip, vec3(0.7, 0.2, 0.15));
+        }
+        // Map pickups: spinning and bobbing.
+        let spin = (game.time as f32 * 1.6) % std::f32::consts::TAU;
+        for pk in &game.pickups {
+            if pk.available_at > game.time {
+                continue;
+            }
+            let bob = (game.time as f32 * 2.5 + pk.def.pos.x * 0.01).sin() * 4.0;
+            let at = pk.def.pos + vec3(0.0, 0.0, bob);
+            let base = Mat4::from_translation(at) * Mat4::from_rotation_z(spin);
+            match pk.def.kind {
+                crate::map::PickupKind::Health => {
+                    self.solid.cube(&(base * Mat4::from_scale(vec3(16.0, 16.0, 12.0))), vec3(0.92, 0.92, 0.92));
+                    let red = vec3(0.85, 0.08, 0.08);
+                    self.solid.cube(&(base * Mat4::from_scale(vec3(16.4, 4.0, 12.4))), red);
+                    self.solid.cube(&(base * Mat4::from_scale(vec3(4.0, 16.4, 12.4))), red);
+                }
+                crate::map::PickupKind::Weapon(id) => {
+                    let m = base * Mat4::from_scale(Vec3::splat(1.3)) * Mat4::from_translation(vec3(-4.0, 0.0, 0.0));
+                    draw_weapon_model(&mut self.solid, id, crate::weapons::Attachments::default(), &m);
+                }
+            }
         }
         self.solid.flush(None);
 
@@ -787,6 +875,44 @@ impl Renderer {
             }
         }
         let now = game.time;
+        // Pickup glows, rockets, laser beams and explosion flashes.
+        for pk in &game.pickups {
+            if pk.available_at <= game.time {
+                let c = match pk.def.kind {
+                    crate::map::PickupKind::Health => [80, 255, 120, 110],
+                    crate::map::PickupKind::Weapon(_) => [255, 210, 80, 130],
+                };
+                self.fx.sprite(pk.def.pos, right, up, 34.0, c);
+            }
+        }
+        for r in &game.rockets {
+            let d = r.vel.normalize_or_zero();
+            self.fx.sprite(r.pos - d * 12.0, right, up, 9.0, [255, 190, 90, 255]);
+            self.fx.sprite(r.pos - d * 20.0, right, up, 14.0, [255, 120, 40, 120]);
+            if self.rng.chance(0.7) {
+                self.particles.push(Particle {
+                    pos: r.pos - d * 16.0,
+                    vel: -d * 60.0 + vec3(0.0, 0.0, 20.0),
+                    t0: now,
+                    life: 0.5,
+                    size: 5.0,
+                    color: vec3(0.55, 0.35, 0.2),
+                    gravity: 0.0,
+                });
+            }
+        }
+        self.beams.retain(|b| now - b.t0 < 0.09);
+        for bm in &self.beams {
+            let k = 1.0 - ((now - bm.t0) / 0.09) as f32;
+            self.fx.beam(bm.a, bm.b, view.pos, 2.2 * k + 0.4, rgba(bm.color, k));
+            self.fx.beam(bm.a, bm.b, view.pos, 0.6, rgba(vec3(1.0, 1.0, 1.0), k));
+        }
+        self.flashes.retain(|f| now - f.t0 < 0.35);
+        for f in &self.flashes {
+            let k = ((now - f.t0) / 0.35) as f32;
+            self.fx.sprite(f.pos, right, up, 60.0 + k * 140.0, rgba(vec3(1.0, 0.7, 0.3), 1.0 - k));
+            self.fx.sprite(f.pos, right, up, 30.0 + k * 40.0, rgba(vec3(1.0, 1.0, 0.8), (1.0 - k * 2.0).max(0.0)));
+        }
         self.tracers.retain(|t| now - t.t0 < 0.12);
         for t in &self.tracers {
             let k = ((now - t.t0) / 0.12) as f32;
@@ -826,7 +952,8 @@ impl Renderer {
             if !p.alive || view.first_person == Some(i) {
                 continue;
             }
-            if game.time - p.last_fire < 0.05 && p.active_id() != WeaponId::Knife {
+            let silenced = p.weapon().is_some_and(|w| w.mods().silenced);
+            if game.time - p.last_fire < 0.05 && p.active_id() != WeaponId::Knife && !silenced {
                 let pos = p.prev_origin.lerp(p.pm.origin, alpha);
                 let (f, _, _) = angle_vectors(p.angles);
                 let tip = muzzle_world(p, pos) + f * 4.0;
@@ -871,6 +998,10 @@ impl Renderer {
     }
 }
 
+pub fn vfov_pub(hfov_deg: f32) -> f32 {
+    vfov(hfov_deg)
+}
+
 fn vfov(hfov_deg: f32) -> f32 {
     // CS uses a horizontal FOV of 90 at 4:3. Keep that feel on wide screens
     // by deriving the vertical FOV from the 4:3 horizontal one.
@@ -878,7 +1009,21 @@ fn vfov(hfov_deg: f32) -> f32 {
     2.0 * (h * 0.75).atan()
 }
 
-fn clear_depth() {
+/// The 3D camera for a view (also used by the editor for overlays).
+pub fn camera_for(view: &View) -> Camera3D {
+    let (fwd, _, up) = angle_vectors(view.angles);
+    Camera3D {
+        position: view.pos,
+        target: view.pos + fwd,
+        up,
+        fovy: vfov(view.fov),
+        z_near: 2.0,
+        z_far: 40000.0,
+        ..Default::default()
+    }
+}
+
+pub fn clear_depth() {
     unsafe {
         let mut gl = get_internal_gl();
         gl.flush();
@@ -1052,11 +1197,27 @@ pub fn draw_player(b: &mut Batch, p: &Player, pos: Vec3, time: f64) {
         part(b, hand, vec3(4.0, 4.0, 4.0), Quat::IDENTITY, boots);
     }
     let wm = base * Mat4::from_rotation_translation(aim, gun_base);
-    draw_weapon_model(b, p.active_id(), &wm);
+    let att = p.weapon().map(|w| w.att).unwrap_or_default();
+    draw_weapon_model(b, p.active_id(), att, &wm);
+}
+
+/// Distance of the barrel tip from the grip, per weapon.
+pub fn muzzle_tip(id: WeaponId) -> f32 {
+    match id {
+        WeaponId::Usp => 8.0,
+        WeaponId::Mp5 => 16.0,
+        WeaponId::M3 => 25.0,
+        WeaponId::Ak47 => 21.0,
+        WeaponId::Scout => 26.0,
+        WeaponId::Awp => 31.0,
+        WeaponId::Laser => 20.0,
+        WeaponId::Rocket => 22.0,
+        WeaponId::Knife => 0.0,
+    }
 }
 
 /// Weapon model in local space: x forward, z up, origin at the grip.
-pub fn draw_weapon_model(b: &mut Batch, id: WeaponId, m: &Mat4) {
+pub fn draw_weapon_model(b: &mut Batch, id: WeaponId, att: crate::weapons::Attachments, m: &Mat4) {
     let black = vec3(0.12, 0.12, 0.13);
     let dark = vec3(0.22, 0.22, 0.24);
     let wood = vec3(0.45, 0.27, 0.13);
@@ -1110,6 +1271,69 @@ pub fn draw_weapon_model(b: &mut Batch, id: WeaponId, m: &Mat4) {
             part(vec3(-9.0, 0.0, 0.2), vec3(12.0, 2.4, 4.0), green);
             part(vec3(4.0, 0.0, -2.0), vec3(2.4, 1.4, 3.2), black);
         }
+        WeaponId::Laser => {
+            let white = vec3(0.85, 0.87, 0.9);
+            part(vec3(4.0, 0.0, 1.6), vec3(14.0, 2.4, 3.0), white);
+            part(vec3(13.0, 0.0, 1.8), vec3(8.0, 1.2, 1.2), dark);
+            part(vec3(8.0, 0.0, 1.6), vec3(3.0, 2.6, 1.0), vec3(0.2, 0.9, 1.0));
+            part(vec3(1.0, 0.0, 1.6), vec3(3.0, 2.6, 1.0), vec3(0.2, 0.9, 1.0));
+            part(vec3(0.5, 0.0, -1.5), vec3(2.2, 1.3, 4.0), black);
+            part(vec3(-6.0, 0.0, 1.2), vec3(8.0, 1.8, 2.6), white);
+        }
+        WeaponId::Rocket => {
+            let olive = vec3(0.32, 0.36, 0.26);
+            part(vec3(9.0, 0.0, 3.0), vec3(28.0, 3.4, 3.4), olive);
+            part(vec3(22.5, 0.0, 3.0), vec3(1.5, 4.2, 4.2), black);
+            part(vec3(-4.5, 0.0, 3.0), vec3(1.5, 4.2, 4.2), black);
+            part(vec3(0.5, 0.0, -1.0), vec3(2.2, 1.3, 4.0), black);
+            part(vec3(8.0, 0.0, -0.5), vec3(2.0, 1.3, 3.0), black);
+        }
+    }
+    if matches!(id, WeaponId::Knife) {
+        return;
+    }
+    // Attachments.
+    let tip = muzzle_tip(id);
+    let top = if id == WeaponId::Rocket { 5.3 } else { 3.2 };
+    let scoped = matches!(id, WeaponId::Scout | WeaponId::Awp);
+    use crate::weapons::{Grip, Muzzle, Sight, Stock};
+    if !scoped {
+        match att.sight {
+            Sight::Iron => {}
+            Sight::RedDot => {
+                part(vec3(3.0, 0.0, top + 0.8), vec3(2.6, 1.4, 1.6), black);
+                part(vec3(1.8, 0.0, top + 0.9), vec3(0.3, 0.8, 0.8), vec3(1.0, 0.1, 0.1));
+            }
+            Sight::Holo => {
+                part(vec3(3.0, 0.0, top + 0.4), vec3(3.4, 2.0, 0.8), black);
+                part(vec3(3.8, 0.0, top + 1.6), vec3(0.5, 2.0, 1.8), black);
+                part(vec3(3.5, 0.0, top + 1.5), vec3(0.2, 1.4, 1.2), vec3(0.3, 1.0, 0.5));
+            }
+            Sight::Acog => {
+                part(vec3(3.0, 0.0, top + 1.2), vec3(6.5, 1.6, 1.6), black);
+                part(vec3(6.4, 0.0, top + 1.2), vec3(0.4, 1.9, 1.9), dark);
+            }
+        }
+    }
+    if id != WeaponId::Rocket {
+        match att.muzzle {
+            Muzzle::None => {}
+            Muzzle::Suppressor => part(vec3(tip + 3.0, 0.0, 1.8), vec3(6.5, 1.5, 1.5), black),
+            Muzzle::Compensator => part(vec3(tip + 1.2, 0.0, 1.8), vec3(2.5, 1.7, 1.7), steel),
+            Muzzle::LongBarrel => part(vec3(tip + 2.5, 0.0, 1.8), vec3(5.0, 0.9, 0.9), dark),
+        }
+    }
+    match att.stock {
+        Stock::Standard => {}
+        Stock::Light => part(vec3(-9.0, 0.0, 1.0), vec3(3.0, 0.6, 2.4), steel),
+        Stock::Heavy => part(vec3(-9.5, 0.0, 0.6), vec3(4.0, 2.0, 3.6), black),
+    }
+    let fore = if id == WeaponId::Usp { 4.0 } else { 9.5 };
+    match att.grip {
+        Grip::None => {}
+        Grip::Vertical => part(vec3(fore, 0.0, -1.8), vec3(1.4, 1.2, 3.6), black),
+        Grip::Angled => part(vec3(fore, 0.0, -0.4), vec3(3.4, 1.2, 1.2), dark),
+        Grip::Stubby => part(vec3(fore, 0.0, -0.8), vec3(1.4, 1.3, 1.8), dark),
     }
 }
 
@@ -1232,7 +1456,9 @@ fn draw_viewmodel(
         swing = (tf / 0.35 * std::f32::consts::PI).sin();
     }
 
-    let local = vec3(18.0 - kick * kick_amt * 2.0, -6.5, -7.0 - dip) + bob;
+    // big guns sit further forward so their back end stays off the screen
+    let push = if id == WeaponId::Rocket { vec3(12.0, -1.5, -1.5) } else { Vec3::ZERO };
+    let local = vec3(18.0 - kick * kick_amt * 2.0, -6.5, -7.0 - dip) + bob + push;
     let origin = view.pos + f * local.x + l * local.y + u * local.z;
     let basis = Mat4::from_cols(f.extend(0.0), l.extend(0.0), u.extend(0.0), origin.extend(1.0));
     let extra = Quat::from_rotation_y(-(kick * kick_amt * 0.12))
@@ -1264,20 +1490,14 @@ fn draw_viewmodel(
         arm(b, vec3(-4.0, 8.0, -8.0), fore - vec3(0.8, -0.4, 0.6), shirt, 2.6);
         arm(b, fore - vec3(1.0, 0.0, 0.5), fore + vec3(0.6, 0.0, 0.1), glove, 2.2);
     }
-    draw_weapon_model(b, id, &m);
+    let att = p.weapon().map(|w| w.att).unwrap_or_default();
+    draw_weapon_model(b, id, att, &m);
     b.flush(None);
 
     // Muzzle flash.
-    if tf < 0.045 && id != WeaponId::Knife {
-        let tip_x = match id {
-            WeaponId::Usp => 8.0,
-            WeaponId::Mp5 => 16.0,
-            WeaponId::M3 => 25.0,
-            WeaponId::Ak47 => 21.0,
-            WeaponId::Scout => 26.0,
-            WeaponId::Awp => 31.0,
-            WeaponId::Knife => 0.0,
-        };
+    let silenced = p.weapon().is_some_and(|w| w.mods().silenced);
+    if tf < 0.045 && id != WeaponId::Knife && id != WeaponId::Laser && !silenced {
+        let tip_x = muzzle_tip(id);
         let tip = m.transform_point3(vec3(tip_x, 0.0, 1.8));
         gl_use_material(fx_mat);
         fx.sprite(tip, r, u, 5.0, [255, 210, 110, 255]);

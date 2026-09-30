@@ -5,7 +5,7 @@
 use macroquad::math::{vec3, Vec3};
 
 use crate::bot::{self, BotBrain, Difficulty};
-use crate::map::{Map, Team};
+use crate::map::{Map, PickupDef, PickupKind, Team, PICKUP_HALF};
 use crate::pmove::*;
 use crate::util::{horizontal, Rng};
 use crate::weapons::*;
@@ -42,7 +42,8 @@ pub struct Settings {
     pub player_name: String,
     pub friendly_fire: bool,
     pub fall_damage: bool,
-    pub autobhop: bool,
+    /// Movement variables (sv_airaccelerate etc), editable in the menu.
+    pub vars: MoveVars,
     /// Riding a ramp counts as being on the ground for weapon accuracy.
     /// In stock CS surfing is "in the air" and rifles are hopeless there.
     pub ramp_accuracy: bool,
@@ -60,7 +61,7 @@ impl Default for Settings {
             player_name: "Player".into(),
             friendly_fire: false,
             fall_damage: false,
-            autobhop: false,
+            vars: MoveVars::surf_server(),
             ramp_accuracy: true,
         }
     }
@@ -70,7 +71,10 @@ impl Default for Settings {
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
 pub enum Event {
-    Shot { player: usize, weapon: WeaponId, pos: Vec3 },
+    Shot { player: usize, weapon: WeaponId, pos: Vec3, silenced: bool },
+    Laser { start: Vec3, end: Vec3, team: Team },
+    Explosion { pos: Vec3 },
+    PickupTaken { player: usize, pos: Vec3, health: bool },
     Tracer { start: Vec3, end: Vec3 },
     Impact { pos: Vec3, normal: Vec3 },
     Hit { victim: usize, attacker: usize, pos: Vec3, headshot: bool },
@@ -108,6 +112,21 @@ pub struct DroppedWeapon {
     pub resting: bool,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct Rocket {
+    pub pos: Vec3,
+    pub vel: Vec3,
+    pub owner: usize,
+    pub t0: f64,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct PickupState {
+    pub def: PickupDef,
+    /// Game time when it is available again (0 = available).
+    pub available_at: f64,
+}
+
 pub struct Player {
     pub name: String,
     pub team: Team,
@@ -141,6 +160,8 @@ pub struct Player {
     pub spawn_count: u32,
     /// Last primary weapon bought; handed out again on respawn.
     pub last_buy: Option<WeaponId>,
+    /// Attachments picked in the buy menu for each weapon type.
+    pub loadout: Vec<(WeaponId, Attachments)>,
     /// Visual only: fades the hover board in and out.
     pub board: f32,
     pub board_normal: Vec3,
@@ -180,6 +201,7 @@ impl Player {
             last_attacker: None,
             spawn_count: 0,
             last_buy: None,
+            loadout: Vec::new(),
             board: 0.0,
             board_normal: Vec3::Z,
         }
@@ -218,21 +240,28 @@ impl Player {
     }
 
     pub fn fov(&self) -> f32 {
-        let def = self.active_id().def();
-        if self.zoom > 0 && (self.zoom as usize) <= def.zoom_fov.len() {
-            def.zoom_fov[self.zoom as usize - 1]
-        } else {
-            90.0
+        match self.weapon() {
+            Some(w) => w.zoom_fov(self.zoom),
+            None => 90.0,
         }
     }
 
     pub fn maxspeed(&self) -> f32 {
         let def = self.active_id().def();
-        if self.zoom > 0 {
-            def.zoom_maxspeed
-        } else {
-            def.maxspeed
-        }
+        let mods = self.weapon().map(|w| w.mods()).unwrap_or_default();
+        let base = if self.zoom > 0 && !def.zoom_fov.is_empty() { def.zoom_maxspeed } else { def.maxspeed };
+        let ads = if self.zoom > 0 && def.zoom_fov.is_empty() { mods.ads_speed } else { 0.0 };
+        (base + mods.speed + ads).max(100.0)
+    }
+
+    /// The attachments this player wants on `id`.
+    pub fn attachments_for(&self, id: WeaponId) -> Attachments {
+        self.loadout.iter().find(|(w, _)| *w == id).map(|(_, a)| *a).unwrap_or_default()
+    }
+
+    pub fn set_attachments(&mut self, id: WeaponId, att: Attachments) {
+        self.loadout.retain(|(w, _)| *w != id);
+        self.loadout.push((id, att));
     }
 
     pub fn reloading(&self) -> bool {
@@ -257,6 +286,8 @@ pub struct Game {
     pub events: Vec<Event>,
     pub killfeed: Vec<KillFeed>,
     pub dropped: Vec<DroppedWeapon>,
+    pub pickups: Vec<PickupState>,
+    pub rockets: Vec<Rocket>,
     pub center_msg: Option<(String, f64)>,
 }
 
@@ -286,8 +317,12 @@ const BOT_NAMES: [&str; 20] = [
 impl Game {
     pub fn new(settings: Settings, seed: u64) -> Game {
         let map = crate::map::load(&settings.map);
-        let mut vars = MoveVars::surf_server();
-        vars.autobhop = settings.autobhop;
+        Game::with_map(map, settings, seed)
+    }
+
+    pub fn with_map(map: Map, settings: Settings, seed: u64) -> Game {
+        let vars = settings.vars;
+        let pickups = map.pickups.iter().map(|d| PickupState { def: *d, available_at: 0.0 }).collect();
         let mut g = Game {
             map,
             vars,
@@ -305,6 +340,8 @@ impl Game {
             events: Vec::new(),
             killfeed: Vec::new(),
             dropped: Vec::new(),
+            pickups,
+            rockets: Vec::new(),
             center_msg: None,
         };
         if let Some(team) = settings.player_team {
@@ -359,6 +396,10 @@ impl Game {
     fn start_round(&mut self) {
         self.round += 1;
         self.dropped.clear();
+        self.rockets.clear();
+        for pk in self.pickups.iter_mut() {
+            pk.available_at = 0.0;
+        }
         let mut taken: Vec<Vec3> = Vec::new();
         for i in 0..self.players.len() {
             let keep = self.players[i].alive && self.round > 1;
@@ -396,7 +437,7 @@ impl Game {
         p.spawn_count += 1;
         if !keep_weapons {
             // Like a CSDM gun menu: humans get their last purchase back.
-            p.primary = if p.is_bot() { None } else { p.last_buy.map(Weapon::new) };
+            p.primary = if p.is_bot() { None } else { p.last_buy.map(|id| Weapon::with(id, p.attachments_for(id))) };
             p.secondary = Some(Weapon::new(WeaponId::Usp));
         } else {
             // refill ammo like a surf server would
@@ -455,20 +496,44 @@ impl Game {
     // Player actions
 
     pub fn buy(&mut self, idx: usize, id: WeaponId) -> bool {
+        if !self.in_buyzone(idx) || !ALL_BUYABLE.contains(&id) {
+            return false;
+        }
+        self.give(idx, id);
+        true
+    }
+
+    /// Hands a weapon to a player (buying, tests) with their attachments.
+    pub fn give(&mut self, idx: usize, id: WeaponId) {
+        let slot = id.def().slot;
+        let p = &mut self.players[idx];
+        let att = p.attachments_for(id);
+        match slot {
+            Slot::Primary => {
+                p.primary = Some(Weapon::with(id, att));
+                p.last_buy = Some(id);
+            }
+            Slot::Secondary => p.secondary = Some(Weapon::with(id, att)),
+            Slot::Melee => return,
+        }
+        self.equip(idx, slot);
+        self.events.push(Event::Pickup { player: idx });
+    }
+
+    /// Cycles one attachment category (0 sight, 1 muzzle, 2 stock, 3 grip)
+    /// of the weapon in hand. Only in the buy zone.
+    pub fn customize(&mut self, idx: usize, cat: usize, dir: i32) -> bool {
         if !self.in_buyzone(idx) {
             return false;
         }
-        let slot = id.def().slot;
         let p = &mut self.players[idx];
-        match slot {
-            Slot::Primary => {
-                p.primary = Some(Weapon::new(id));
-                p.last_buy = Some(id);
-            }
-            Slot::Secondary => p.secondary = Some(Weapon::new(id)),
-            Slot::Melee => return false,
+        let Some(w) = p.weapon_mut() else { return false };
+        w.att.cycle(cat, dir);
+        let (id, att, levels) = (w.id, w.att, w.zoom_levels());
+        p.set_attachments(id, att);
+        if p.zoom > levels {
+            p.zoom = 0;
         }
-        self.equip(idx, slot);
         self.events.push(Event::Pickup { player: idx });
         true
     }
@@ -485,7 +550,8 @@ impl Game {
         p.zoom = 0;
         p.resume_zoom = None;
         p.reload_end = None;
-        p.next_attack = now + p.active_id().def().deploy_time as f64;
+        let deploy = p.active_id().def().deploy_time * p.weapon().map_or(1.0, |w| w.mods().deploy);
+        p.next_attack = now + deploy as f64;
         p.deploy_time = now;
         self.events.push(Event::Deploy { player: idx });
     }
@@ -574,10 +640,16 @@ impl Game {
                 self.players[i].bot = Some(brain);
                 for a in actions {
                     match a {
-                        bot::BotAction::Buy(id) => {
+                        bot::BotAction::Buy(id, att) => {
+                            self.players[i].set_attachments(id, att);
                             self.buy(i, id);
                         }
                         bot::BotAction::Switch(slot) => self.switch_weapon(i, slot),
+                        bot::BotAction::Suicide => {
+                            if self.players[i].alive {
+                                self.kill(i, None, None, false);
+                            }
+                        }
                     }
                 }
                 self.run_player(i, cmd);
@@ -594,6 +666,7 @@ impl Game {
         }
 
         self.update_dropped();
+        self.update_rockets();
 
         // Deathmatch respawns.
         if self.settings.mode == Mode::Deathmatch {
@@ -684,7 +757,7 @@ impl Game {
         // Triggers.
         let teleport = {
             let p = &self.players[i];
-            self.map.teleports.iter().any(|z| z.touches(p.pm.origin, p.pm.mins(), p.pm.maxs()))
+            self.map.in_kill_zone(p.pm.origin, p.pm.mins())
         };
         if teleport {
             let team = self.players[i].team;
@@ -705,6 +778,7 @@ impl Game {
         }
 
         self.pickup_weapons(i);
+        self.touch_pickups(i, cmd.buttons & IN_USE != 0 && self.players[i].prev_buttons & IN_USE == 0);
         self.weapon_frame(i, cmd);
         self.players[i].prev_buttons = cmd.buttons;
     }
@@ -748,7 +822,8 @@ impl Game {
                         }
                     }
                     if again {
-                        p.reload_end = Some(now + WeaponId::M3.def().reload_time as f64);
+                        let m = p.weapon().map_or(1.0, |w| w.mods().reload);
+                        p.reload_end = Some(now + (WeaponId::M3.def().reload_time * m) as f64);
                     } else {
                         p.reload_end = None;
                     }
@@ -775,10 +850,10 @@ impl Game {
         // Secondary attack: scope / knife stab.
         if attack2_pressed && now >= self.players[i].next_attack {
             let id = self.players[i].active_id();
-            let def = id.def();
-            if !def.zoom_fov.is_empty() && !self.players[i].reloading() {
+            let levels = self.players[i].weapon().map_or(0, |w| w.zoom_levels());
+            if levels > 0 && !self.players[i].reloading() {
                 let p = &mut self.players[i];
-                p.zoom = (p.zoom + 1) % (def.zoom_fov.len() as u8 + 1);
+                p.zoom = (p.zoom + 1) % (levels + 1);
                 p.resume_zoom = None;
                 self.events.push(Event::Zoom { player: i });
             } else if id == WeaponId::Knife {
@@ -834,8 +909,9 @@ impl Game {
         if can_reload && now >= self.players[i].next_attack && (want_reload || (empty && !attack)) {
             let p = &mut self.players[i];
             let id = p.active_id();
+            let m = p.weapon().map_or(1.0, |w| w.mods().reload) as f64;
             let t = if id == WeaponId::M3 { 0.55 } else { id.def().reload_time as f64 };
-            p.reload_end = Some(now + t);
+            p.reload_end = Some(now + t * m);
             if p.zoom > 0 {
                 p.zoom = 0;
             }
@@ -857,33 +933,49 @@ impl Game {
     fn fire(&mut self, i: usize) {
         let now = self.time;
         let st = self.shooter_state(i);
-        let (spread, id, angles, src) = {
+        let zoom = self.players[i].zoom;
+        let (spread, id, angles, src, mods) = {
             let p = &mut self.players[i];
             let angles = p.angles + p.pm.punchangle;
             let src = p.pm.eye();
             let w = p.weapon_mut().unwrap();
-            let spread = compute_spread(w, st, now);
+            let mods = w.mods();
+            let mut spread = compute_spread(w, st, now) * mods.spread;
+            if !st.on_ground {
+                spread *= mods.air_spread;
+            } else if st.speed2d > 140.0 {
+                spread *= mods.move_spread;
+            }
+            if w.is_ads(zoom) {
+                spread *= mods.ads_spread;
+            }
             if !w.def().automatic {
                 w.shots_fired += 1;
             }
             w.clip -= 1;
             w.last_fire = now;
-            (spread, w.id, angles, src)
+            (spread, w.id, angles, src, mods)
         };
         let def = id.def();
         let (fwd, right, up) = angle_vectors(angles);
-        for _ in 0..def.pellets.max(1) {
-            let x = self.rng.range(-0.5, 0.5) + self.rng.range(-0.5, 0.5);
-            let y = self.rng.range(-0.5, 0.5) + self.rng.range(-0.5, 0.5);
-            let dir = (fwd + right * (x * spread) + up * (y * spread)).normalize();
-            self.fire_bullet(i, src, dir, id);
+        if id == WeaponId::Rocket {
+            let start = src + fwd * 16.0 + right * 6.0 - up * 4.0;
+            self.rockets.push(Rocket { pos: start, vel: fwd * ROCKET_SPEED, owner: i, t0: now });
+        } else {
+            for _ in 0..def.pellets.max(1) {
+                let x = self.rng.range(-0.5, 0.5) + self.rng.range(-0.5, 0.5);
+                let y = self.rng.range(-0.5, 0.5) + self.rng.range(-0.5, 0.5);
+                let dir = (fwd + right * (x * spread) + up * (y * spread)).normalize();
+                self.fire_bullet(i, src, dir, id, mods);
+            }
         }
         {
             let p = &mut self.players[i];
-            let mut punch = p.pm.punchangle;
+            let before = p.pm.punchangle;
+            let mut punch = before;
             let w = p.weapon_mut().unwrap();
             apply_recoil(w, st, &mut punch, &mut self.rng);
-            p.pm.punchangle = punch;
+            p.pm.punchangle = before + (punch - before) * mods.recoil;
             p.next_attack = now + def.cycle as f64;
             p.last_fire = now;
             if !def.zoom_fov.is_empty() && p.zoom > 0 {
@@ -891,7 +983,7 @@ impl Game {
                 p.zoom = 0;
             }
         }
-        self.events.push(Event::Shot { player: i, weapon: id, pos: src });
+        self.events.push(Event::Shot { player: i, weapon: id, pos: src, silenced: mods.silenced });
     }
 
     /// Ray against player hitboxes. Returns (distance, hit group).
@@ -925,8 +1017,17 @@ impl Game {
         best
     }
 
-    fn fire_bullet(&mut self, i: usize, src: Vec3, dir: Vec3, id: WeaponId) {
+    fn fire_bullet(&mut self, i: usize, src: Vec3, dir: Vec3, id: WeaponId, mods: Mods) {
         let def = id.def();
+        let range_mod = (def.range_modifier + mods.range_bonus).min(1.0);
+        let team = self.players[i].team;
+        let tracer = |g: &mut Game, a: Vec3, b: Vec3| {
+            if id == WeaponId::Laser {
+                g.events.push(Event::Laser { start: a, end: b, team });
+            } else if !mods.silenced {
+                g.events.push(Event::Tracer { start: a, end: b });
+            }
+        };
         let range = if id == WeaponId::M3 { 3000.0 } else { 8192.0 };
         let wtr = self.map.world.trace_ray(src, src + dir * range);
         let wall_dist = wtr.fraction * range;
@@ -944,13 +1045,14 @@ impl Game {
         let muzzle = src + dir * 20.0 + vec3(0.0, 0.0, -6.0);
         match hit {
             Some((j, t, g)) => {
-                let dmg = if id == WeaponId::M3 {
-                    (1.0 - t / range) * def.damage
-                } else {
-                    def.damage * def.range_modifier.powf(t / 500.0)
-                };
+                let dmg = mods.damage
+                    * if id == WeaponId::M3 {
+                        (1.0 - t / range) * def.damage
+                    } else {
+                        def.damage * range_mod.powf(t / 500.0)
+                    };
                 let pos = src + dir * t;
-                self.events.push(Event::Tracer { start: muzzle, end: pos });
+                tracer(self, muzzle, pos);
                 let same_team = self.players[j].team == self.players[i].team;
                 if !same_team || self.settings.friendly_fire {
                     self.damage(j, Some(i), dmg, g, def.armor_ratio, Some(id), pos);
@@ -958,7 +1060,7 @@ impl Game {
             }
             None => {
                 let end = src + dir * wall_dist;
-                self.events.push(Event::Tracer { start: muzzle, end });
+                tracer(self, muzzle, end);
                 if wtr.hit() {
                     self.events.push(Event::Impact { pos: end, normal: wtr.normal });
                 }
@@ -1164,8 +1266,9 @@ impl Game {
                 }
             }
         }
-        let teleports = &self.map.teleports;
-        self.dropped.retain(|d| now - d.time < 60.0 && !teleports.iter().any(|z| z.touches(d.pos, mins, maxs)));
+        let kill_z = self.map.kill_z;
+        self.dropped.retain(|d| now - d.time < 60.0 && d.pos.z > kill_z);
+        let _ = maxs;
     }
 
     fn pickup_weapons(&mut self, i: usize) {
@@ -1204,9 +1307,204 @@ impl Game {
         }
     }
 
+    fn update_rockets(&mut self) {
+        let now = self.time;
+        let mut k = 0;
+        while k < self.rockets.len() {
+            let r = self.rockets[k];
+            let end = r.pos + r.vel * TICK;
+            let ext = vec3(3.0, 3.0, 3.0);
+            let tr = self.map.world.trace(r.pos, end, -ext, ext);
+            let mut hit_pos = if tr.hit() { Some(tr.endpos) } else { None };
+            // direct hits on players (not the owner right after launch)
+            for (j, p) in self.players.iter().enumerate() {
+                if !p.alive || (j == r.owner && now - r.t0 < 0.3) {
+                    continue;
+                }
+                let lo = p.pm.origin + p.pm.mins() - ext;
+                let hi = p.pm.origin + p.pm.maxs() + ext;
+                let seg = end - r.pos;
+                // sample the segment; rockets are slow enough for this
+                for s in 0..=4 {
+                    let q = r.pos + seg * (s as f32 / 4.0);
+                    if q.cmpge(lo).all() && q.cmple(hi).all() {
+                        hit_pos = Some(q);
+                        break;
+                    }
+                }
+                if hit_pos.is_some() && hit_pos != Some(tr.endpos) {
+                    break;
+                }
+            }
+            if let Some(pos) = hit_pos {
+                self.rockets.swap_remove(k);
+                self.explode(pos - r.vel.normalize_or_zero() * 4.0, r.owner);
+                continue;
+            }
+            if now - r.t0 > 8.0 || end.z < self.map.kill_z - 500.0 {
+                self.rockets.swap_remove(k);
+                continue;
+            }
+            self.rockets[k].pos = end;
+            k += 1;
+        }
+    }
+
+    /// Rocket splash: damage falls off with distance, walls block it, and
+    /// everybody in range gets knocked back (rocket jumps).
+    fn explode(&mut self, pos: Vec3, owner: usize) {
+        self.events.push(Event::Explosion { pos });
+        let max_dmg = WeaponId::Rocket.def().damage;
+        let owner_team = self.players[owner].team;
+        let owner_mods = self.players[owner].primary.map(|w| w.mods()).unwrap_or_default();
+        for j in 0..self.players.len() {
+            let p = &self.players[j];
+            if !p.alive {
+                continue;
+            }
+            let lo = p.pm.origin + p.pm.mins();
+            let hi = p.pm.origin + p.pm.maxs();
+            let closest = pos.clamp(lo, hi);
+            let d = closest.distance(pos);
+            if d > ROCKET_RADIUS {
+                continue;
+            }
+            let center = p.pm.origin;
+            if self.map.world.trace_ray(pos, center).hit() && self.map.world.trace_ray(pos, closest).hit() {
+                continue;
+            }
+            let k = 1.0 - d / ROCKET_RADIUS;
+            let full = max_dmg * k * owner_mods.damage;
+            let dir = (center - pos).normalize_or(Vec3::Z) + vec3(0.0, 0.0, 0.25);
+            {
+                let p = &mut self.players[j];
+                let push = (full * 7.0).min(950.0) * if j == owner { 1.2 } else { 1.0 };
+                p.pm.velocity += dir.normalize() * push;
+                p.pm.onground = false;
+            }
+            let same = self.players[j].team == owner_team;
+            let dmg = if j == owner { full * 0.4 } else { full };
+            if j == owner || !same || self.settings.friendly_fire {
+                self.damage(
+                    j,
+                    if j == owner { None } else { Some(owner) },
+                    dmg,
+                    HitGroup::Chest,
+                    1.0,
+                    Some(WeaponId::Rocket),
+                    closest,
+                );
+                if j == owner && !self.players[j].alive {
+                    // self kill still credits the rocket in the feed
+                }
+            }
+        }
+    }
+
+    /// Map pickups: health packs and weapon spawners.
+    fn touch_pickups(&mut self, i: usize, use_pressed: bool) {
+        if !self.players[i].alive || self.pickups.is_empty() {
+            return;
+        }
+        let now = self.time;
+        for k in 0..self.pickups.len() {
+            let pk = self.pickups[k];
+            if pk.available_at > now {
+                continue;
+            }
+            let (origin, mins, maxs) = {
+                let p = &self.players[i];
+                (p.pm.origin, p.pm.mins(), p.pm.maxs())
+            };
+            let half = vec3(PICKUP_HALF, PICKUP_HALF, PICKUP_HALF);
+            let zone = crate::map::Aabb::new(pk.def.pos - half, pk.def.pos + half);
+            if !zone.touches(origin, mins, maxs) {
+                continue;
+            }
+            let taken = match pk.def.kind {
+                PickupKind::Health => {
+                    let p = &mut self.players[i];
+                    if p.health < 100.0 {
+                        p.health = (p.health + 50.0).min(100.0);
+                        true
+                    } else {
+                        false
+                    }
+                }
+                PickupKind::Weapon(id) => {
+                    let slot = id.def().slot;
+                    let is_bot = self.players[i].is_bot();
+                    let (free, current) = {
+                        let p = &self.players[i];
+                        match slot {
+                            Slot::Primary => (p.primary.is_none(), p.primary.map(|w| w.id)),
+                            _ => (p.secondary.is_none(), p.secondary.map(|w| w.id)),
+                        }
+                    };
+                    let upgrade = is_bot && current.is_some_and(|c| weapon_tier(id) > weapon_tier(c));
+                    if free || use_pressed || upgrade {
+                        if !free {
+                            // swap: drop what we hold in that slot
+                            self.switch_weapon(i, slot);
+                            if self.players[i].active == slot {
+                                self.drop_weapon(i);
+                            }
+                        }
+                        let att = if is_bot {
+                            crate::weapons::Attachments::random(&mut self.rng)
+                        } else {
+                            self.players[i].attachments_for(id)
+                        };
+                        let p = &mut self.players[i];
+                        match slot {
+                            Slot::Primary => p.primary = Some(Weapon::with(id, att)),
+                            _ => p.secondary = Some(Weapon::with(id, att)),
+                        }
+                        self.equip(i, slot);
+                        true
+                    } else {
+                        false
+                    }
+                }
+            };
+            if taken {
+                self.pickups[k].available_at = now + pk.def.kind.respawn();
+                let health = pk.def.kind == PickupKind::Health;
+                self.events.push(Event::PickupTaken { player: i, pos: pk.def.pos, health });
+            }
+        }
+    }
+
+    /// Weapon spawner close enough to swap with USE, for the HUD hint.
+    pub fn pickup_near(&self, i: usize) -> Option<WeaponId> {
+        let p = &self.players[i];
+        self.pickups.iter().find_map(|pk| match pk.def.kind {
+            PickupKind::Weapon(id)
+                if pk.available_at <= self.time
+                    && pk.def.pos.distance(p.pm.origin) < 70.0
+                    && p.primary.is_some_and(|w| w.id != id) =>
+            {
+                Some(id)
+            }
+            _ => None,
+        })
+    }
+
     /// Line of sight between two points through the world.
     pub fn visible(&self, a: Vec3, b: Vec3) -> bool {
         !self.map.world.trace_ray(a, b).hit()
+    }
+}
+
+/// How much a bot prefers a weapon over another.
+pub fn weapon_tier(id: WeaponId) -> u32 {
+    match id {
+        WeaponId::Knife => 0,
+        WeaponId::Usp => 1,
+        WeaponId::M3 | WeaponId::Mp5 => 2,
+        WeaponId::Scout => 3,
+        WeaponId::Ak47 => 4,
+        WeaponId::Awp | WeaponId::Laser | WeaponId::Rocket => 5,
     }
 }
 

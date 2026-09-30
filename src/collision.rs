@@ -36,6 +36,9 @@ pub struct Brush {
     pub mins: Vec3,
     pub maxs: Vec3,
     pub mat: Mat,
+    /// Corner points; the brush is their convex hull. Kept for the editor
+    /// and map files.
+    pub points: Vec<Vec3>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -189,6 +192,7 @@ impl Brush {
             mins: to_f(mins),
             maxs: to_f(maxs),
             mat,
+            points: verts.iter().map(|v| to_f(*v)).collect(),
         })
     }
 
@@ -207,6 +211,11 @@ impl Brush {
 
     /// Convex hull of a small point set (brute force, fine for < 20 points).
     pub fn hull(points: &[Vec3], mat: Mat) -> Brush {
+        Brush::try_hull(points, mat).expect("degenerate hull brush")
+    }
+
+    /// Convex hull of a point set, `None` if the points are flat.
+    pub fn try_hull(points: &[Vec3], mat: Mat) -> Option<Brush> {
         let pts: Vec<DVec3> = points.iter().map(|p| DVec3::new(p.x as f64, p.y as f64, p.z as f64)).collect();
         let mut planes: Vec<(DVec3, f64)> = Vec::new();
         let n = pts.len();
@@ -230,7 +239,7 @@ impl Brush {
                 }
             }
         }
-        Brush::from_planes(&planes, mat).expect("degenerate hull brush")
+        Brush::from_planes(&planes, mat)
     }
 
     /// Point containment test (used for render culling helpers and tests).

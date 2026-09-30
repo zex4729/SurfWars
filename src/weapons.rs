@@ -14,6 +14,10 @@ pub enum WeaponId {
     Ak47,
     Scout,
     Awp,
+    /// Energy rifle: hitscan beam, dead accurate, no bullet drop-off.
+    Laser,
+    /// Rocket launcher: slow projectile with splash damage and knockback.
+    Rocket,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -43,8 +47,23 @@ pub struct WeaponDef {
     pub kill_icon: &'static str,
 }
 
-pub const ALL_BUYABLE: [WeaponId; 6] =
-    [WeaponId::Usp, WeaponId::M3, WeaponId::Mp5, WeaponId::Ak47, WeaponId::Scout, WeaponId::Awp];
+/// What the buy menu sells. Everything else only comes from map pickups.
+pub const ALL_BUYABLE: [WeaponId; 3] = [WeaponId::Usp, WeaponId::M3, WeaponId::Mp5];
+
+/// Every weapon that can be placed as a map pickup.
+pub const ALL_PICKUP_WEAPONS: [WeaponId; 8] = [
+    WeaponId::Usp,
+    WeaponId::M3,
+    WeaponId::Mp5,
+    WeaponId::Ak47,
+    WeaponId::Scout,
+    WeaponId::Awp,
+    WeaponId::Laser,
+    WeaponId::Rocket,
+];
+
+pub const ROCKET_SPEED: f32 = 1100.0;
+pub const ROCKET_RADIUS: f32 = 260.0;
 
 impl WeaponId {
     pub fn def(self) -> &'static WeaponDef {
@@ -56,7 +75,315 @@ impl WeaponId {
             WeaponId::Ak47 => &AK47,
             WeaponId::Scout => &SCOUT,
             WeaponId::Awp => &AWP,
+            WeaponId::Laser => &LASER,
+            WeaponId::Rocket => &ROCKET,
         }
+    }
+
+    /// Short name used in files (map pickups).
+    pub fn key(self) -> &'static str {
+        self.def().kill_icon
+    }
+
+    pub fn from_key(k: &str) -> Option<WeaponId> {
+        ALL_PICKUP_WEAPONS.iter().copied().chain([WeaponId::Knife]).find(|w| w.key() == k)
+    }
+}
+
+static LASER: WeaponDef = WeaponDef {
+    name: "Laser Rifle",
+    slot: Slot::Primary,
+    clip: 40,
+    reserve: 80,
+    damage: 24.0,
+    range_modifier: 1.0,
+    cycle: 0.09,
+    reload_time: 2.2,
+    deploy_time: 1.0,
+    maxspeed: 240.0,
+    zoom_maxspeed: 240.0,
+    armor_ratio: 1.5,
+    pellets: 1,
+    automatic: true,
+    zoom_fov: &[],
+    kill_icon: "laser",
+};
+
+static ROCKET: WeaponDef = WeaponDef {
+    name: "Rocket Launcher",
+    slot: Slot::Primary,
+    clip: 4,
+    reserve: 12,
+    damage: 125.0,
+    range_modifier: 1.0,
+    cycle: 0.8,
+    reload_time: 3.2,
+    deploy_time: 1.2,
+    maxspeed: 220.0,
+    zoom_maxspeed: 220.0,
+    armor_ratio: 1.0,
+    pellets: 0,
+    automatic: true,
+    zoom_fov: &[],
+    kill_icon: "rocket",
+};
+
+// ---------------------------------------------------------------------------
+// Attachments
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Hash)]
+pub enum Sight {
+    #[default]
+    Iron,
+    RedDot,
+    Holo,
+    Acog,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Hash)]
+pub enum Muzzle {
+    #[default]
+    None,
+    Suppressor,
+    Compensator,
+    LongBarrel,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Hash)]
+pub enum Stock {
+    #[default]
+    Standard,
+    Light,
+    Heavy,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Hash)]
+pub enum Grip {
+    #[default]
+    None,
+    Vertical,
+    Angled,
+    Stubby,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Hash)]
+pub struct Attachments {
+    pub sight: Sight,
+    pub muzzle: Muzzle,
+    pub stock: Stock,
+    pub grip: Grip,
+}
+
+/// Multipliers and offsets an attachment set applies to a weapon.
+#[derive(Clone, Copy, Debug)]
+pub struct Mods {
+    /// All spread.
+    pub spread: f32,
+    /// Extra spread factor while airborne (not on ground or ramp).
+    pub air_spread: f32,
+    /// Extra spread factor while running (> 140 u/s on the ground).
+    pub move_spread: f32,
+    /// Spread factor while aiming down a sight.
+    pub ads_spread: f32,
+    pub recoil: f32,
+    pub damage: f32,
+    /// Added to the range modifier (less damage falloff).
+    pub range_bonus: f32,
+    pub reload: f32,
+    pub deploy: f32,
+    /// Added to the movement speed.
+    pub speed: f32,
+    /// Added to the movement speed while aiming down the sight.
+    pub ads_speed: f32,
+    /// Zoom FOV the sight gives weapons without a scope.
+    pub zoom: Option<f32>,
+    pub silenced: bool,
+}
+
+impl Default for Mods {
+    fn default() -> Self {
+        Mods {
+            spread: 1.0,
+            air_spread: 1.0,
+            move_spread: 1.0,
+            ads_spread: 1.0,
+            recoil: 1.0,
+            damage: 1.0,
+            range_bonus: 0.0,
+            reload: 1.0,
+            deploy: 1.0,
+            speed: 0.0,
+            ads_speed: 0.0,
+            zoom: None,
+            silenced: false,
+        }
+    }
+}
+
+impl Sight {
+    pub const ALL: [Sight; 4] = [Sight::Iron, Sight::RedDot, Sight::Holo, Sight::Acog];
+    pub fn name(self) -> &'static str {
+        match self {
+            Sight::Iron => "Iron sights",
+            Sight::RedDot => "Red dot",
+            Sight::Holo => "Holographic",
+            Sight::Acog => "4x ACOG",
+        }
+    }
+    pub fn desc(self) -> &'static str {
+        match self {
+            Sight::Iron => "no zoom",
+            Sight::RedDot => "MOUSE2 zoom, -15% spread aimed",
+            Sight::Holo => "MOUSE2 zoom, -20% spread aimed, slower draw",
+            Sight::Acog => "4x zoom, -40% spread aimed, slow while aimed",
+        }
+    }
+}
+
+impl Muzzle {
+    pub const ALL: [Muzzle; 4] = [Muzzle::None, Muzzle::Suppressor, Muzzle::Compensator, Muzzle::LongBarrel];
+    pub fn name(self) -> &'static str {
+        match self {
+            Muzzle::None => "No muzzle",
+            Muzzle::Suppressor => "Suppressor",
+            Muzzle::Compensator => "Compensator",
+            Muzzle::LongBarrel => "Long barrel",
+        }
+    }
+    pub fn desc(self) -> &'static str {
+        match self {
+            Muzzle::None => "-",
+            Muzzle::Suppressor => "silent, no flash, -15% recoil, -8% damage",
+            Muzzle::Compensator => "-30% recoil, +8% spread",
+            Muzzle::LongBarrel => "+8% damage, less falloff, -8 speed",
+        }
+    }
+}
+
+impl Stock {
+    pub const ALL: [Stock; 3] = [Stock::Standard, Stock::Light, Stock::Heavy];
+    pub fn name(self) -> &'static str {
+        match self {
+            Stock::Standard => "Standard stock",
+            Stock::Light => "Light stock",
+            Stock::Heavy => "Heavy stock",
+        }
+    }
+    pub fn desc(self) -> &'static str {
+        match self {
+            Stock::Standard => "-",
+            Stock::Light => "+12 speed, -20% air spread, +12% recoil",
+            Stock::Heavy => "-25% recoil, -12 speed",
+        }
+    }
+}
+
+impl Grip {
+    pub const ALL: [Grip; 4] = [Grip::None, Grip::Vertical, Grip::Angled, Grip::Stubby];
+    pub fn name(self) -> &'static str {
+        match self {
+            Grip::None => "No grip",
+            Grip::Vertical => "Vertical grip",
+            Grip::Angled => "Angled grip",
+            Grip::Stubby => "Stubby grip",
+        }
+    }
+    pub fn desc(self) -> &'static str {
+        match self {
+            Grip::None => "-",
+            Grip::Vertical => "-20% recoil",
+            Grip::Angled => "30% faster draw, 15% faster reload",
+            Grip::Stubby => "-25% running spread, -8% recoil",
+        }
+    }
+}
+
+fn cycle<T: Copy + PartialEq>(all: &[T], cur: T, dir: i32) -> T {
+    let i = all.iter().position(|x| *x == cur).unwrap_or(0) as i32;
+    all[(i + dir).rem_euclid(all.len() as i32) as usize]
+}
+
+impl Attachments {
+    pub fn random(rng: &mut Rng) -> Attachments {
+        Attachments {
+            sight: Sight::ALL[rng.range_u32(0, 3) as usize],
+            muzzle: Muzzle::ALL[rng.range_u32(0, 3) as usize],
+            stock: Stock::ALL[rng.range_u32(0, 2) as usize],
+            grip: Grip::ALL[rng.range_u32(0, 3) as usize],
+        }
+    }
+
+    /// Cycles category `cat` (0 sight, 1 muzzle, 2 stock, 3 grip).
+    pub fn cycle(&mut self, cat: usize, dir: i32) {
+        match cat {
+            0 => self.sight = cycle(&Sight::ALL, self.sight, dir),
+            1 => self.muzzle = cycle(&Muzzle::ALL, self.muzzle, dir),
+            2 => self.stock = cycle(&Stock::ALL, self.stock, dir),
+            _ => self.grip = cycle(&Grip::ALL, self.grip, dir),
+        }
+    }
+
+    pub fn mods(&self) -> Mods {
+        let mut m = Mods::default();
+        match self.sight {
+            Sight::Iron => {}
+            Sight::RedDot => {
+                m.zoom = Some(75.0);
+                m.ads_spread = 0.85;
+            }
+            Sight::Holo => {
+                m.zoom = Some(65.0);
+                m.ads_spread = 0.8;
+                m.deploy *= 1.1;
+            }
+            Sight::Acog => {
+                m.zoom = Some(40.0);
+                m.ads_spread = 0.6;
+                m.ads_speed -= 25.0;
+            }
+        }
+        match self.muzzle {
+            Muzzle::None => {}
+            Muzzle::Suppressor => {
+                m.silenced = true;
+                m.recoil *= 0.85;
+                m.damage *= 0.92;
+            }
+            Muzzle::Compensator => {
+                m.recoil *= 0.7;
+                m.spread *= 1.08;
+            }
+            Muzzle::LongBarrel => {
+                m.damage *= 1.08;
+                m.range_bonus += 0.03;
+                m.speed -= 8.0;
+            }
+        }
+        match self.stock {
+            Stock::Standard => {}
+            Stock::Light => {
+                m.speed += 12.0;
+                m.air_spread *= 0.8;
+                m.recoil *= 1.12;
+            }
+            Stock::Heavy => {
+                m.recoil *= 0.75;
+                m.speed -= 12.0;
+            }
+        }
+        match self.grip {
+            Grip::None => {}
+            Grip::Vertical => m.recoil *= 0.8,
+            Grip::Angled => {
+                m.deploy *= 0.7;
+                m.reload *= 0.85;
+            }
+            Grip::Stubby => {
+                m.move_spread *= 0.75;
+                m.recoil *= 0.92;
+            }
+        }
+        m
     }
 }
 
@@ -205,6 +532,7 @@ pub struct Weapon {
     pub decrease_shots_at: f64,
     pub delay_fire: bool,
     pub direction: bool,
+    pub att: Attachments,
 }
 
 impl Weapon {
@@ -220,7 +548,49 @@ impl Weapon {
             decrease_shots_at: 0.0,
             delay_fire: false,
             direction: false,
+            att: Attachments::default(),
         }
+    }
+
+    pub fn with(id: WeaponId, att: Attachments) -> Weapon {
+        Weapon { att, ..Weapon::new(id) }
+    }
+
+    pub fn mods(&self) -> Mods {
+        if self.id == WeaponId::Knife {
+            Mods::default()
+        } else {
+            self.att.mods()
+        }
+    }
+
+    /// Number of zoom levels: the built-in scope, or one from a sight.
+    pub fn zoom_levels(&self) -> u8 {
+        let d = self.def();
+        if !d.zoom_fov.is_empty() {
+            d.zoom_fov.len() as u8
+        } else if self.mods().zoom.is_some() {
+            1
+        } else {
+            0
+        }
+    }
+
+    pub fn zoom_fov(&self, level: u8) -> f32 {
+        if level == 0 {
+            return 90.0;
+        }
+        let d = self.def();
+        if !d.zoom_fov.is_empty() {
+            d.zoom_fov[(level as usize - 1).min(d.zoom_fov.len() - 1)]
+        } else {
+            self.mods().zoom.unwrap_or(90.0)
+        }
+    }
+
+    /// True for sight zoom (aim down sights) as opposed to a sniper scope.
+    pub fn is_ads(&self, level: u8) -> bool {
+        level > 0 && self.def().zoom_fov.is_empty()
     }
 
     fn initial_accuracy(id: WeaponId) -> f32 {
@@ -320,6 +690,14 @@ pub fn compute_spread(w: &mut Weapon, s: ShooterState, now: f64) -> f32 {
             spread
         }
         WeaponId::M3 => 0.0675,
+        WeaponId::Laser => {
+            if s.on_ground {
+                0.002
+            } else {
+                0.012
+            }
+        }
+        WeaponId::Rocket => 0.0,
     }
 }
 
@@ -367,6 +745,8 @@ fn kick_back(
 pub fn apply_recoil(w: &mut Weapon, s: ShooterState, punch: &mut Vec3, rng: &mut Rng) {
     match w.id {
         WeaponId::Knife => {}
+        WeaponId::Laser => punch.x -= 0.25,
+        WeaponId::Rocket => punch.x -= 3.0,
         WeaponId::Usp | WeaponId::Scout | WeaponId::Awp => punch.x -= 2.0,
         WeaponId::M3 => {
             if s.on_ground {

@@ -9,7 +9,7 @@
 
 use macroquad::math::{vec3, Vec3};
 
-use crate::collision::{CollisionWorld, Trace};
+use crate::collision::{CollisionWorld, Trace, DIST_EPSILON};
 
 pub const IN_ATTACK: u32 = 1 << 0;
 pub const IN_JUMP: u32 = 1 << 1;
@@ -58,7 +58,6 @@ pub struct MoveVars {
 
 impl MoveVars {
     /// Stock Counter-Strike 1.6 server settings.
-    #[allow(dead_code)]
     pub fn stock() -> MoveVars {
         MoveVars {
             gravity: 800.0,
@@ -73,6 +72,19 @@ impl MoveVars {
             bounce: 1.0,
             bhop_cap: true,
             autobhop: false,
+        }
+    }
+
+    /// A more forgiving surf setup: more air control, floatier gravity,
+    /// higher speed limit and auto bunny hop.
+    pub fn easy_surf() -> MoveVars {
+        MoveVars {
+            airaccelerate: 150.0,
+            gravity: 650.0,
+            maxvelocity: 5000.0,
+            bhop_cap: false,
+            autobhop: true,
+            ..MoveVars::stock()
         }
     }
 
@@ -725,6 +737,16 @@ impl<'a> PlayerMove<'a> {
                 self.s.origin = tr.endpos;
                 original_velocity = self.s.velocity;
                 numplanes = 0;
+            } else if !tr.startsolid {
+                // Ramp bug guard: we are already closer to this plane than
+                // DIST_EPSILON, so float noise makes every move along it look
+                // like it crosses it and all bumps make no progress. Step back
+                // out to the epsilon distance, like a fresh trace would leave us.
+                let nudged = self.s.origin + tr.normal * DIST_EPSILON;
+                if !self.world.box_stuck(nudged, self.s.mins(), self.s.maxs()) {
+                    self.s.origin = nudged;
+                    all_fraction += 1e-4;
+                }
             }
             if tr.fraction == 1.0 {
                 break;
